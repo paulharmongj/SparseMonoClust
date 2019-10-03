@@ -126,7 +126,7 @@ print.HierarchicalSparseCluster <- function(x,...){
 ```
 
 Additional functions: 
-```{r, echo = FALSE}
+```{r, echo = FALSE, eval = FALSE, include = FALSE}
 GetWCSS <- function(x, Cs, ws=NULL){
   wcss.perfeature <- numeric(ncol(x))
   for(k in unique(Cs)){
@@ -422,7 +422,7 @@ nba_clust$wbound
 # plot sparse clustering results
 #for data visualizationn
 library(Rtsne)
-rt1 <- Rtsne(nba_clust$u, perplexity = 10)
+rt1 <- Rtsne(nba_clust$u, perplexity = 10, is_distance = TRUE)
 
 #cut at a spot
 groups <- cutree(nba_clust$hc, k = 3) #better to cut at number of clusters or dist?
@@ -431,20 +431,22 @@ groups <- cutree(nba_clust$hc, k = 3) #better to cut at number of clusters or di
 
 ## Applying t-SNE to Sparse Clustering Results
 
-We can consider using sparse clustering to regularize the high-dimensional dissimilarity matrices for each dataset. 
+We can consider using sparse clustering to regularize the high-dimensional dissimilarity matrices for each dataset. The distance matrix U created by the sparse clustering of the data is passed through the 'Rtsne' function in R (as a distance matrix) and the resulting solutions are plotted. 
+
+For the t-SNE, I'm less concerned about the perplexity values than I am the results of the clustering, so I set perplexity equal to 10 for all the NBA examples below. 
 
 ```{r}
 #for data visualization (not necessarily helpful but nice way to aggregate players)
 library(Rtsne); par(mfrow = c(1,1))
 set.seed(922019)
-rt1 <- Rtsne(nba_clust$u, perp = 10)
+rt1 <- Rtsne(nba_clust$u, perp = 10, is_distance = TRUE)
 plot(rt1$Y, pch = 20, col = factor(groups))
 title("T-SNE of Sparse Cluster Results")
 text(rt1$Y, pch = 20, label = nba$LAST, cex = 0.5, pos = 3)
 
 ```
 
-Now I try a couple different tuning parameter values and compare the results. 
+Now I try a couple different tuning parameter values and compare the results. For the strong lasso penalty I used a wbound of 1.1 (the minimum w value is 1), for moderate I used 2, and for weak I used 10. 
 
 ```{r}
 #wbound is limited by being GREATER than 1
@@ -455,6 +457,8 @@ nba_clust4 <- nba_mat %>% HierarchicalSparseCluster(., wbound = 10)
 ```
 
 The below plots compare several different levels of the tuning parameter.  Sparse clustering was used on the data to develop clusters, and then the U matrix that was generated from each version was input into t-SNE. The t-SNE results on the sparse distance matrices was then compared to the solution. 
+
+The colors are based on a 3-cluster solution. The value of 3 was chosen arbitrarily, but such a choice could be optimized in later work. 
 
 ```{r}
 #show the weight vectors
@@ -468,20 +472,20 @@ groups2 <- cutree(nba_clust3$hc, k = 3)
 groups3 <- cutree(nba_clust4$hc, k = 3)
 
 #Strong Lasso
-rt1 <- Rtsne(nba_clust2$u,perplexity = 10)
+rt1 <- Rtsne(nba_clust2$u,perplexity = 10, is_distance = TRUE)
 plot(rt1$Y, pch = 20, col = factor(groups1))
 title("T-SNE of Sparse Cluster Results: Strong Lasso")
 text(rt1$Y, pch = 20, label = nba$LAST, cex = 0.5, pos = 3)
 
 #Middle Lasso
-rt1 <- Rtsne(nba_clust3$u, perplexity = 10)
+rt1 <- Rtsne(nba_clust3$u, perplexity = 10, is_distance = TRUE)
 plot(rt1$Y, pch = 20, col = factor(groups2))
 title("T-SNE of Sparse Cluster Results: Medium Lasso")
 text(rt1$Y, pch = 20, label = nba$LAST, cex = 0.5, pos = 3)
 
 
 #Weak Lasso
-rt1 <- Rtsne(nba_clust4$u, perplexity = 10)
+rt1 <- Rtsne(nba_clust4$u, perplexity = 10, is_distance = TRUE)
 plot(rt1$Y, pch = 20, col = factor(groups3))
 title("T-SNE of Sparse Cluster Results: Weak Lasso")
 text(rt1$Y, pch = 20, label = nba$LAST, cex = 0.5, pos = 3)
@@ -491,7 +495,7 @@ text(rt1$Y, pch = 20, label = nba$LAST, cex = 0.5, pos = 3)
 
 A function that does this is given below: 
 
-It seems that this runs reasonably well on small datasets but breaks on large ones. 
+It seems that this runs reasonably well on small datasets but breaks on large ones. This has to do with the functionality of the sparcl call - it cannnot handle datasets in the neighborhood of 10,000 records or larger. 
 
 ```{r}
 ##Prior to using: 
@@ -508,8 +512,8 @@ sparseTSNE <- function(data, perplexity = 10, lambda = 5, nclust = 3, title = "S
   temp_mat <- data %>% na.omit() %>% as.matrix() #needs to remove NA and non-numeric data
   clust <- HierarchicalSparseCluster(temp_mat, wbound = lambda)
   
-  #use tsne
-  tsne1 <- Rtsne(temp_mat, perplexity = perplexity)
+  #use tsne on the DISTANCE MATRIX so make sure is_distance = TRUE 
+  tsne1 <- Rtsne(clust$u, perplexity = perplexity, is_distance = TRUE)
   
   #generate the plot
   ##specify grps for colors
@@ -525,19 +529,215 @@ Testing the function:
 ```{r}
 #test on a couple datasets
 qb_select <- qb %>% dplyr::select(-c(qb,lg,home_away))
-sparseTSNE(qb_select) #this produces an error because the dataset is 'large'
+#can't run this because it throws an error
+#sparseTSNE(qb_select) #this produces an error because the dataset is 'large'
 
 #on a smaller size
-temp <- dplyr::distinct(qb_select[1:100,])
+temp <- dplyr::distinct(qb_select[1:5000,])
 sparseTSNE(temp)
 ```
 
 
 ## Optimizing the tuning parameter: 
 
+The attached vignette includes some code on how to use the HierarchicalSparseCluster.permute function to pick the 'best' tuning parameter value. Revisiting the NBA data, we can assess the different values of the tuning parameter: 
+
+When interpreting the plot below, the x axis refers to the **number of nonzero weights** not the value of the tuning parameter itself. I add that as text. 
+
+```{r}
+ # Do tuning parameter selection for sparse hierarchical clustering
+ # Just need to specify a grid for it to search
+  perm.out <- HierarchicalSparseCluster.permute(nba_mat, wbounds=c(1.1,seq(1.5,10, by = .5)),
+nperms=5)
+  print(perm.out)
+  plot(perm.out)
+  text(perm.out$nnonzerows, perm.out$gaps, labels = perm.out$wbounds, col = "red")
+  
+```
+
+From the Github page, the code for HierarchicalSparseCluster.permute is included in the code chunk below. The function appears to take default values of 10 permtations and requires a sequence of tuning parameters to consider (with minimum value 1). Dissimilarity is computed as squared Euclidean distance but absolute value can be used as well. 
+
+```{r, eval = FALSE}
+HierarchicalSparseCluster.permute <-
+function(x,  nperms=10, wbounds=NULL, dissimilarity=c("squared.distance","absolute.value"), standardize.arrays=FALSE){
+  dissimilarity <- match.arg(dissimilarity)
+  if(is.null(wbounds)) wbounds <- seq(1.1, sqrt(ncol(x))*.7, len=10)
+  if(min(wbounds)<=1) stop("Cannot have wbounds <= 1")
+  if(length(wbounds)<2) stop("Wbounds should be a vector with at least 2 elements.")
+  tots <- rep(NA,length(wbounds))
+  permtots <- matrix(NA, nrow=length(wbounds), ncol=nperms)
+  nnonzerows <- rep(NA,length(wbounds))
+  if(standardize.arrays){
+    #x <- t(scale(t(x),T,T))
+    x <- sweep(x,1,apply(x,1,mean,na.rm=TRUE),"-")
+    x <- sweep(x,1,apply(x,1,sd,na.rm=TRUE),"/")   
+  }
+  cat("Running sparse hierarchical clustering on unpermuted data",fill=TRUE)
+  for(i in 1:length(wbounds)){ 
+    cat(i,fill=FALSE)
+    if(i==1) out <- HierarchicalSparseCluster(x,  wbound=wbounds[i],silent=TRUE,dissimilarity=dissimilarity)
+    if(i>1) out <- HierarchicalSparseCluster(x=NULL,dists=out$dists,wbound=wbounds[i], silent=TRUE,dissimilarity=dissimilarity)
+    nnonzerows[i] <- sum(out$ws!=0)
+    tots[i] <- out$crit
+  }
+  cat(fill=TRUE)
+  cat("Running sparse hierarchical clustering on permuted data",fill=TRUE)
+  permdists <- out$dists
+  for(k in 1:nperms){
+    cat("Permutation ", k, " of ", nperms,fill=TRUE)
+    # Oooohhhh.. It turns out that rather than permuting the columns of x and then computing a dist matrix, we can simply permute
+    #  the columns of the (n choose 2)xp dist matrix.
+    for(j in 1:ncol(permdists)) permdists[,j] <- sample(permdists[,j])
+    for(i in 1:length(wbounds)){
+      cat(i,fill=FALSE)
+      perm.out <- HierarchicalSparseCluster(x=NULL, dists=permdists,wbound=wbounds[i], silent=TRUE,dissimilarity=dissimilarity)
+      permtots[i,k] <- max(perm.out$crit)
+    }
+    cat(fill=TRUE)
+  }
+  gaps <- (log(tots)-apply(log(permtots),1,mean))
+  out <- list(tots=tots, permtots=permtots, nnonzerows=nnonzerows, gaps=gaps, sdgaps=apply(log(permtots),1,sd), wbounds=wbounds, bestw=wbounds[which.max(gaps)], dists=out$dists)
+  class(out) <- "HierarchicalSparseCluster.permute"
+  cat(fill=TRUE)
+  return(out)
+}
+
+print.HierarchicalSparseCluster.permute <- function(x,...){
+  cat("Tuning parameter selection results for Sparse Hierarchical Clustering:", fill=TRUE)
+  mat <- round(cbind(x$wbounds, x$nnonzerows, x$gaps, x$sdgaps),4)
+  dimnames(mat) <- list(1:length(x$wbounds), c("Wbound", "# Non-Zero Ws", "Gap Statistic", "Standard Deviation"))
+  print(mat, quote=FALSE)
+  cat("Tuning parameter that leads to largest Gap statistic: ", x$bestw, fill=TRUE)
+}
+
+plot.HierarchicalSparseCluster.permute <- function(x,...){
+  plot(x$nnonzerows, x$gaps, log="x", main="Gap Statistics", xlab="# Non-zero Wjs", ylab="")
+  lines(x$nnonzerows, x$gaps)
+}
+```
 
 
-## Applieed to House Data
+
+##Testing the Function Line-by-Line: 
+
+To better understand what sparcl is doing in the permute method, I tried running each line of code 1 by 1. 
+
+```{r}
+#for function args
+nperms = 10
+wbounds = c(1.1,3,5,7,9)
+dissimilarity = "squared.distance"
+x <- nba_mat
+
+
+  
+#this code prints errors if something is not specified
+  if(is.null(wbounds)) wbounds <- seq(1.1, sqrt(ncol(x))*.7, len=10)
+  if(min(wbounds)<=1) stop("Cannot have wbounds <= 1")
+  if(length(wbounds)<2) stop("Wbounds should be a vector with at least 2 elements.")
+  tots <- rep(NA,length(wbounds))
+  permtots <- matrix(NA, nrow=length(wbounds), ncol=nperms) #to be used later, fills up criterion values by each column (for a single permutation). (i.e. this would be wide with 10 wbounds and 100 permutations)
+  nnonzerows <- rep(NA,length(wbounds))
+  if(standardize.arrays){
+    #x <- t(scale(t(x),T,T))
+    x <- sweep(x,1,apply(x,1,mean,na.rm=TRUE),"-")
+    x <- sweep(x,1,apply(x,1,sd,na.rm=TRUE),"/")   
+  }
+  #prints the following
+  cat("Running sparse hierarchical clustering on unpermuted data",fill=TRUE)
+```
+
+The next section takes the wbounds list and calculates the HierarchicalSparseCluster solution at each bound in the sequence. It runs the original iteration on the data and then passes the distance matrix through the resulting iterations. The number of nonzero weights are tracked as are the criterion values  (coming from the getUW function that is called in each iteration in HSC function). 
+
+```{r}
+#For each w-value in the wbounds list, the following chunk prints the iteration, then runs the
+  #hierarchical sparse cluster (on data in 1st iteration and passes thru to next iters)
+  #
+  for(i in 1:length(wbounds)){ 
+    cat(i,fill=FALSE)
+    if(i==1) out <- HierarchicalSparseCluster(x,  wbound=wbounds[i],silent=TRUE,dissimilarity=dissimilarity)
+    out_1 <- out
+    if(i>1) out <- HierarchicalSparseCluster(x=NULL,dists=out$dists,wbound=wbounds[i], silent=TRUE,dissimilarity=dissimilarity)
+    out_k <- out
+    nnonzerows[i] <- sum(out$ws!=0)
+    tots[i] <- out$crit
+  }
+#this prints out 5 iterations
+  tots
+  nnonzerows
+```
+
+  
+The next phase looks at the permuted data, based on something similar to the gap statistic developed by Tibshirani in 2000. The goal here is to take each column of the nxp dissimilarity matrix and shuffle it. Then, once we have done that, we can cluster based on the 'permuted' distance matrix and return just the maximum criterion value from each iteration at each w bound in each permutation. There will be 10 permutations by default but you can do more if desired. 
+
+```{r}
+#quick sanity check
+out_k$dists == out1$dists
+
+  cat(fill=TRUE) #prints a space
+  cat("Running sparse hierarchical clustering on permuted data",fill=TRUE) #prints this statement
+  permdists <- out$dists #the nxp dissimilarity matrix for the last iteration from previous (final iteration) #This is the SAME FOR ALL ITERATIONS SO NO BIGGIE THAT ITS THE LAST ONE
+  
+for(k in 1:nperms){
+    cat("Permutation ", k, " of ", nperms,fill=TRUE) #prints the permutations tracking
+    # Oooohhhh.. It turns out that rather than permuting the columns of x and then computing a dist matrix, we can simply permute
+    #  the columns of the (n choose 2)xp dist matrix.
+  ##Paul: The below code takes each COLUMN of permdists and shuffles the individual elements
+    for(j in 1:ncol(permdists)) permdists[,j] <- sample(permdists[,j]) 
+    #could have written with an apply
+    ##apply(permdists,2,sample) #would do the same thing
+    
+    
+    ### Alternatively, you COULD just permute the columns of the original data matrix X and then create a new distance matrix. I'm going to try this here. 
+    nba_permute_dist <- apply(nba[,-c(1:3)], 2, sample) %>% dist()
+    
+    
+    
+    #Paul: For the length of W values, calculate the Hierarchical sparse clusters (based on the distance matrix from the previous iterations in the earlier version, and return JUST the 
+   for(i in 1:length(wbounds)){
+      cat(i,fill=FALSE)
+      perm.out <- HierarchicalSparseCluster(x=NULL, dists=permdists,wbound=wbounds[i], silent=TRUE,dissimilarity=dissimilarity)
+      permtots[i,k] <- max(perm.out$crit)
+    }
+    cat(fill=TRUE)
+}
+  permtots #prints the permuted distance matrix-based criterion values
+  
+```  
+  
+Now the gap statsitic can be calculated based on the mean of the permutations. 
+
+```{r} 
+length(tots) #5x1 vector
+dim(permtots) #5x10 matrix (since 10 permutations were done)
+
+#takes the mean of the permutations to get to a single criterion for each wbound value
+  gaps <- (log(tots)-apply(log(permtots),1,mean))
+#the formula is defined in the gap statistic paper
+#optimal wbound would have the largest gap statistic value
+  
+# prints the  output for the function
+  out <- list(tots=tots, permtots=permtots, nnonzerows=nnonzerows, gaps=gaps, sdgaps=apply(log(permtots),1,sd), wbounds=wbounds, bestw=wbounds[which.max(gaps)], dists=out$dists)
+  class(out) <- "HierarchicalSparseCluster.permute"
+  cat(fill=TRUE)
+  return(out)
+#ENDS FUNCTION
+```
+
+
+
+
+
+
+
+
+
+## Additional Choices we may need to consider
+
+The method used to calculate dissimilarity is something we can change in this code. 
+
+
+## Applied to House Data
 
 Additionally I apply the sparcl methods to real estate transacation data. 
 
