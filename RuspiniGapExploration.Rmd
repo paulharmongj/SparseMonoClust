@@ -1,0 +1,448 @@
+---
+title: "Ruspini Tuning Example"
+author: "Paul Harmon"
+date: "1/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(monoClust)
+library(cluster)
+library(sparcl)
+library(magrittr)
+library(dplyr)
+
+## Sparse MonoClust
+## Wrapper for MonoClust
+
+SparseMonoClust <- function(rawdata, wbound = 1.1, dissimilarity = "squared.distance", nclusters = 3, scale1 = FALSE, warnings = FALSE){
+  ## Define a l2norm function
+  l2n <- function(vec){
+    return(sqrt(sum(vec^2)))
+  }
+  
+  ## Check Packages
+  if(!require(sparcl)){install.packages('sparcl');library(sparcl)}
+  if(!require(monoClust)){install.packages('monoClust');library(monoClust)}
+  
+  ## Optional Scaling of the original data
+if(scale1 == TRUE){data <- apply(rawdata, 2,scale)} else{data <- rawdata}
+  ## Generates a warning that the units are standardized so no longer on the same units
+if(warnings == TRUE){print("Hey! You're not going to be on the original units!")}
+  
+  ## First Step: Perform Sparse Clustering to Get W Vector
+  hc1 <- HierarchicalSparseCluster(as.matrix(data), wbound = wbound, dissimilarity = dissimilarity, silent = TRUE)
+  
+  
+  ## Second Step: Calculate the Distance Matrix and L2Norm (to match scaling of the 'sparcl' u matrix)
+
+  dist2 <- function(vec){(dist(vec)^2)}
+  ds <- apply(data, 2, dist2)
+  weighted_feature_dists <- sweep(ds, 2, hc1$ws, '*')
+  single_weighted_dist <- apply(weighted_feature_dists, 1, sum)
+
+  u2 <- matrix(0, nrow = nrow(data), ncol = nrow(data))
+  u2[lower.tri(u2)] <- single_weighted_dist
+  u2[upper.tri(u2)] <- single_weighted_dist
+  normed_u2 <- u2/l2n(c(u2)) #generates the normed u vector (identical to the hcl$u)
+  
+  ## Now - reweight the original data with both the weights and the l2norm
+  ws_final <- sqrt(hc1$ws/l2n(c(u2)))
+  data_weight <- sweep(data, 2, ws_final, '*')
+  
+  
+  ## Passes the weighted data into MonoClust
+  mc <- MonoClust(as.data.frame(data_weight), nclusters = nclusters)
+  
+  ## Post-Processing: Either another step in this function, or a method applied afterward
+  
+return(list(clustob = mc, u = normed_u2, weighted_data = data_weight, w = hc1$ws, sparclob = hc1))}
+
+## For input into ClusGap
+####
+sparseclust1 <- function(x, k, wb){
+  # Calcluates the sparse clustering for use in clusgap
+  temp <- SparseMonoClust(rawdata = x, wbound = wb, nclusters = k) 
+  Membership <- temp$clustob$membership
+return(list(cluster = Membership))}
+
+sparseclust2 <- function(x, k, wb){
+  temp <- HierarchicalSparseCluster(x, wbound = wb, silent = TRUE, method = "complete")
+  Membership <- cutree(temp$hc, k = k)
+  return(list(cluster = Membership))
+}
+
+MonoClust1 <- function(x, k){
+  temp <- MonoClust(as.data.frame(x), nclusters = k)
+  Membership <- temp$membership
+return(list(cluster = Membership))}
+
+
+```
+
+## Introduction
+
+This document overviews an exmaple of tuning sparse monothetic clustering with the *Ruspini* dataset (Ruspini, 1970).  The *Ruspini* dataset contains 75 observations of two variables, typically simply denoted $x$ and $y$. In general, there are 4 groups which are relatively well-separated, making it a dataset that is well suited for illustration of different clustering techniques.
+
+As a reminder, we first show the *Ruspini* dataset as clustered by several methods, including a hierarchical clustering solution and one using Monothetic clustering. (Note that these produce the same clusters, as shown in the below plots). 
+
+```{r}
+#scale the data
+rus <- scale(cluster::ruspini)
+
+#Hclust
+hc1 <- hclust(dist(rus))
+plot(hc1)
+clusterz <- cutree(hc1, k= 4)
+ruspini$Hclust <- clusterz %>% as.factor()
+ggplot(ruspini, aes(x, y, color = Hclust)) + geom_point() + ggtitle("Ruspini with Hierarchical Clustering") + 
+  scale_color_viridis_d(end = 0.8)
+
+mc1 <- MonoClust(data.frame(rus), nclusters = 4)
+ruspini$MCclust <- mc1$membership %>% as.factor()
+
+ggplot(ruspini, aes(x, y, color = MCclust)) + geom_point() + ggtitle("Ruspini with MonoClust")  + 
+  scale_color_viridis_d(end = 0.8, option = "B")
+
+
+# try the sparse clustering version (shouldn't really zero anything out)
+# this version picks a strong penalty 
+mc2 <- SparseMonoClust(rus)
+ruspini$SparseMClust <- mc2$clustob$membership %>% as.factor()
+
+ggplot(ruspini, aes(x, y, color = SparseMClust)) + geom_point() + ggtitle("Ruspini with MonoClust")  + 
+  scale_color_viridis_d(end = 0.8, option = "B")
+
+
+#Different version picks a relatively weak penalty, and matches the output from Hclust and MonoClust
+mc3 <- SparseMonoClust(rus, wbound = 10)
+ruspini$SparseMClust2 <- mc3$clustob$membership %>% as.factor()
+
+ggplot(ruspini, aes(x, y, color = SparseMClust2)) + geom_point() + ggtitle("Ruspini with Sparse MonoClust")  + 
+  scale_color_viridis_d(end = 0.8, option = "B")
+
+
+#Tried with Hierarchical Sparse Cluster
+mc4 <- HierarchicalSparseCluster(as.matrix(rus), wbound = 2)
+ruspini$SparseHClust <- cutree(mc4$hc, k = 4) %>% as.factor()
+
+ggplot(ruspini, aes(x, y, color = SparseHClust)) + geom_point() + ggtitle("Ruspini with Sparse Hierarchical Clustering")  + 
+  scale_color_viridis_d(end = 0.8, option = "B")
+
+```
+
+
+
+
+## Method
+
+For the *Ruspini* dataset, we fix w and assess the optimal number of clusters. Then, we iterate through a grid of w values. Then, assess for several numbers of clusters.  This will give us a plot of different gap statistic values where the lines (groups) are the w values and the k-values are along the x-axis. 
+
+This leads to a handful of important questions: 
+
++ Can you compare lines (across fixed w values) using Gap?
++ 
+```{r}
+#fill up a matrix
+wvals <- seq(1.1,3, length = 5)
+kvals <- 2:4
+gapvals <- list()
+
+
+# Single For Loop - max K at 6, and iterate through different w values
+for(i in 1:length(wvals)){
+  gapvals[[i]]<- clusGap(rus, FUN = sparseclust1, K.max = 6, wb = wvals[i], B = 50, spaceH0 = "original", d.power = 2)
+}
+  
+
+```
+
+Generate a plot of gap statistic values by k - we can see that the most sparse solution is globally worse, from a gap perspective. Based on the gap statistic, k is chosen to be 6 - the maximum value of K that I'm allowing for in this loop. 
+
+```{r}
+df1 <- rbind(gapvals[[1]]$Tab,
+gapvals[[2]]$Tab,
+gapvals[[3]]$Tab,
+gapvals[[4]]$Tab,
+gapvals[[5]]$Tab) %>% as_tibble()
+
+df1$W <- rep(wvals, each = 6) %>% factor()
+df1$K <- rep(1:6, times = 5)
+
+ggplot(df1, aes(K, gap, color = W)) + geom_line(alpha = .8) + geom_point() + scale_color_viridis_d(option = "D", end = 0.9) + theme_bw() + ggtitle("Gap Statistics") + geom_errorbar(aes(ymin = gap - SE.sim, ymax = gap + SE.sim), width = 0.2, alpha = 0.8)
+
+```
+
+Let's look at regular Monoclust with the gap statistic. 
+
+```{r}
+gapvals2 <- list()
+
+gapvals2<- clusGap(rus, FUN = MonoClust1, K.max = 6, B = 50, spaceH0 = "original", d.power = 2)
+
+
+df2 <- gapvals2$Tab %>% as_tibble()
+
+df2$K <- rep(1:6, times = 1)
+
+ggplot(df2, aes(K, gap)) + geom_line(alpha = .8, color = "green3") + geom_point(color = "dodgerblue3") +  theme_bw() + ggtitle("Gap Statistics: Regular MonoClust") + geom_errorbar(aes(ymin = gap - SE.sim, ymax = gap + SE.sim), width = 0.2, alpha = 0.7, color = "dodgerblue")
+
+```
+
+
+It looks like in the absence of noise features, we don't really see an improvement from additional sparsity in this setting - this makes sense because the Ruspini dataset has only two features in it. A strongly sparse implementation is likely to remove one of those features and leave out a critical piece of information (when you consider the structure of the data). 
+
+
+
+
+## Simulation
+
+See the pairs plot to note that we generate 10 additional noise features from random normal distributions with mean 0 and standard deviation 1.  It's easy to see the clear structure coming from the X and Y featuers and nothing from the new features. 
+```{r}
+#Add standard normal noise variables to the Ruspini dataset
+rus_temp <- matrix(0, nrow = nrow(rus), ncol = 2)
+rus_noise <- rus #initializes new dataset with ruspini 2 vars
+for(j in 1:2){
+  rus_temp <- rnorm(nrow(rus), 0, 1) #generates a new feature from random normal (standard)
+  rus_noise <- cbind(rus_temp, rus_noise) #appends to dataset 
+}
+colnames(rus_noise) <- c(paste0("V", 1:2), "X", "Y")
+pairs(rus_noise, col = ruspini$Hclust)
+
+#plot of ruspini with noise features (stacking pair-wise plots)
+#colz <- rgb(.8,.1,.4,alpha = 0.5)
+#plot(rus, pch = 20)
+#for(i in 1:9){
+ # points(rus_noise[i], rus_noise[i+1], col = colz)
+#}  
+  
+```
+
+### Step-By-Step Look
+
+Here, we step through the sparse clustering algorithm to see how it removes or re-weights features, and generates the final cluster solution. 
+
+
+```{r}
+#examine with a single noise feature
+par(mfrow = c(3,2))
+wvals <- c(1.1,1.2,1.3,1.5,2)
+for(j in 1:length(wvals)){
+  spc <- sparseclust1(rus_noise[,2:4], wb = wvals[j], k = 4)
+  plot(rus_noise[,3:4], col = spc$cluster, pch = 20, main = paste0("Sparse MonoClust: ", wvals[j]))
+}
+
+```
+
+Interesting that in the presence of an additional noise feature, more stringent penalization would lead to a *worse* clustering. Looking into each iteration a little more deeply, we can examine the feature weights that are assigned at each run of the sparse monoclust run.
+
+```{r}
+spc_list <- list()
+for(j in 1:length(wvals)){
+  spc_list[[j]] <- SparseMonoClust(rus_noise[,c(3,4,2)], wb = wvals[j])
+}  
+```
+
+A look at the weights below shows that the sparse PCA appears to be chasing both the noise feature *and* largely ignoring the second dimension of the ruspini dataset. 
+```{r}
+#look at W's
+spc_list[[1]]$w
+spc_list[[2]]$w
+spc_list[[3]]$w
+spc_list[[4]]$w
+spc_list[[5]]$w
+
+```
+
+Note that the w's are created by sparcl::HierarchicalSparseCluster, not by any of the code I wrote. Thus, the sparse PCA appears to be causing the problem here.  The reason, then, that we see better performance by the less sparse verisons is that the sparsity is actually removing the features that drive the signal and keeping the one that doesn't. 
+
+If we examine this in the setting where there are multiple noise features, we can see that it actually **removes** the two features of interest and leaves the noise features. 
+
+```{r}
+#examine with a single noise feature
+par(mfrow = c(3,2))
+wvals <- c(1.1,1.2,1.3,1.5,2)
+for(j in 1:length(wvals)){
+  spc <- sparseclust1(rus_noise, wb = wvals[j], k = 4)
+  plot(rus_noise[,3:4], col = spc$cluster, pch = 20, main = paste0("Sparse MonoClust: ", wvals[j]))
+}
+
+spc_list <- list()
+for(j in 1:length(wvals)){
+  spc_list[[j]] <- SparseMonoClust(rus_noise, wb = wvals[j])
+}  
+
+#look at W's
+spc_list[[1]]$w
+spc_list[[2]]$w
+spc_list[[3]]$w
+spc_list[[4]]$w
+spc_list[[5]]$w
+```
+
+
+
+
+### Gap Values
+Look at the regular MonoClust - in either case, the noise features appear to have swamped the algorithm.  We are seeing inconsistent results, and certainly no indication that the gap statistic chooses the right 4-cluster solution as optimal.  This indicates that the monothetic clustering is negatively impacted by the presence of those noise features. In fact, based on the Gap statistic, MonoClust has no ability to identify any structure at all - these results would suggest that it is not a good idea to cluster the data.  
+
+```{r }
+gapvals3 <- list()
+
+gapvals3<- clusGap(rus_noise[,2:4], FUN = MonoClust1, K.max = 6, B = 50, spaceH0 = "original", d.power = 2)
+
+
+df3 <- gapvals3$Tab %>% as_tibble()
+
+df3$K <- rep(1:6, times = 1)
+
+ggplot(df3, aes(K, gap)) + geom_line(alpha = .8, color = "yellowgreen") + geom_point()+ theme_bw() + ggtitle("Gap: Regular MonoClust w/ Noise") + geom_errorbar(aes(ymin = gap - SE.sim, ymax = gap + SE.sim), width = 0.2, alpha = 0.8, color = "yellow4")
+
+```
+
+
+Now, let's look back at the Sparse implementation: the results appear to indicate that the choice of the level of sparsity (s) substantively impacts whether or not we end up picking the right number of clusters. 
+
+
+```{r}
+gapvals4 <- list()
+for(i in 1:length(wvals)){
+  #sp1 <- sparseclust1(x = rus, wb= wvals[i]) 
+  gapvals4[[i]]<- clusGap(rus_noise[,2:4], FUN = sparseclust1, K.max = 6,wb = wvals[i], B = 50, spaceH0 = "original", d.power = 2)
+}
+
+df4 <- rbind(gapvals4[[1]]$Tab,
+gapvals4[[2]]$Tab,
+gapvals4[[3]]$Tab,
+gapvals4[[4]]$Tab,
+gapvals4[[5]]$Tab) %>% as_tibble()
+
+df4$W <- rep(wvals, each = 6) %>% factor()
+df4$K <- rep(1:6, times = 5)
+
+ggplot(df4, aes(K, gap, color = W)) + geom_line(alpha = .8) + geom_point() + scale_color_viridis_d(option = "D", end = 0.9) + theme_bw() + ggtitle("Gap: Sparse MonoClust w/ Noise") + geom_errorbar(aes(ymin = gap - SE.sim, ymax = gap + SE.sim), width = 0.2, alpha = 0.8)
+
+```
+
+
+Comparsison with regular sparse clustering (with complete linkage). 
+
+```{r}
+gapvals5 <- list()
+for(i in 1:length(wvals)){
+  #performs regular sparse clustering
+  gapvals5[[i]]<- clusGap(rus_noise, FUN = sparseclust2, K.max = 6,wb = wvals[i], B = 50, spaceH0 = "original", d.power = 2)
+}
+
+df5 <- rbind(gapvals5[[1]]$Tab,
+gapvals5[[2]]$Tab,
+gapvals5[[3]]$Tab,
+gapvals5[[4]]$Tab,
+gapvals5[[5]]$Tab) %>% as_tibble()
+
+df5$W <- rep(wvals, each = 6) %>% factor()
+df5$K <- rep(1:6, times = 5)
+
+ggplot(df5, aes(K, gap, color = W)) + geom_line(alpha = .8) + geom_point() + scale_color_viridis_d(option = "D", end = 0.9) + theme_bw() + ggtitle("Gap: Sparse Hierarchical Clustering w/ Noise") + geom_errorbar(aes(ymin = gap - SE.sim, ymax = gap + SE.sim), width = 0.2, alpha = 0.8)
+```
+
+
+## Additional Noise Variables {.tabset}
+
+I repeat the same process but with 10 simulated noise features included below. 
+
+```{r}
+#Add standard normal noise variables to the Ruspini dataset
+rus_temp <- matrix(0, nrow = nrow(rus), ncol = 10)
+rus_noise <- rus #initializes new dataset with ruspini 2 vars
+for(j in 1:10){
+  rus_temp <- rnorm(nrow(rus), 0, 1) #generates a new feature from random normal (standard)
+  rus_noise <- cbind(rus_temp, rus_noise) #appends to dataset 
+}
+colnames(rus_noise) <- c(paste0("V", 1:10), "X", "Y")
+pairs(rus_noise, col = ruspini$Hclust)
+
+```
+
+
+### Monothetic
+```{r}
+gapvals3 <- list()
+
+gapvals3<- clusGap(rus_noise, FUN = MonoClust1, K.max = 6, B = 50, spaceH0 = "original", d.power = 2)
+
+
+df3 <- gapvals3$Tab %>% as_tibble()
+
+df3$K <- rep(1:6, times = 1)
+
+ggplot(df3, aes(K, gap)) + geom_line(alpha = .8, color = "yellowgreen") + geom_point()+ theme_bw() + ggtitle("Gap: Regular MonoClust w/ Noise") + geom_errorbar(aes(ymin = gap - SE.sim, ymax = gap + SE.sim), width = 0.2, alpha = 0.8, color = "yellow4")
+```
+
+
+
+### Sparse Mono
+
+```{r}
+gapvals4 <- list()
+for(i in 1:length(wvals)){
+  #sp1 <- sparseclust1(x = rus, wb= wvals[i]) 
+  gapvals4[[i]]<- clusGap(rus_noise, FUN = sparseclust1, K.max = 6,wb = wvals[i], B = 50, spaceH0 = "original", d.power = 2)
+}
+
+df4 <- rbind(gapvals4[[1]]$Tab,
+gapvals4[[2]]$Tab,
+gapvals4[[3]]$Tab,
+gapvals4[[4]]$Tab,
+gapvals4[[5]]$Tab) %>% as_tibble()
+
+df4$W <- rep(wvals, each = 6) %>% factor()
+df4$K <- rep(1:6, times = 5)
+
+ggplot(df4, aes(K, gap, color = W)) + geom_line(alpha = .8) + geom_point() + scale_color_viridis_d(option = "D", end = 0.9) + theme_bw() + ggtitle("Gap: Sparse MonoClust w/ Noise") + geom_errorbar(aes(ymin = gap - SE.sim, ymax = gap + SE.sim), width = 0.2, alpha = 0.8)
+```
+
+
+### Sparse Hclust
+
+```{r}
+gapvals5 <- list()
+for(i in 1:length(wvals)){
+  #performs regular sparse clustering
+  gapvals5[[i]]<- clusGap(rus_noise, FUN = sparseclust2, K.max = 6,wb = wvals[i], B = 50, spaceH0 = "original", d.power = 2)
+}
+
+df5 <- rbind(gapvals5[[1]]$Tab,
+gapvals5[[2]]$Tab,
+gapvals5[[3]]$Tab,
+gapvals5[[4]]$Tab,
+gapvals5[[5]]$Tab) %>% as_tibble()
+
+df5$W <- rep(wvals, each = 6) %>% factor()
+df5$K <- rep(1:6, times = 5)
+
+ggplot(df5, aes(K, gap, color = W)) + geom_line(alpha = .8) + geom_point() + scale_color_viridis_d(option = "D", end = 0.9) + theme_bw() + ggtitle("Gap: Sparse Hierarchical Clustering w/ Noise") + geom_errorbar(aes(ymin = gap - SE.sim, ymax = gap + SE.sim), width = 0.2, alpha = 0.8)
+```
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

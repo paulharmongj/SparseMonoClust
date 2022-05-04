@@ -1,0 +1,91 @@
+---
+title: "Sparse PCA Witten"
+author: "Paul Harmon"
+date: "`r format(Sys.time(), ' %B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages('PMA')
+library(PMA)
+
+#bring in a dataset
+library(readr)
+library(tibble)
+library(magrittr)
+library(dplyr)
+predicted_house <- read_csv("C:/Users/paulh/Documents/predicted_house.csv")
+```
+
+
+# Introduction
+
+This document overviews Witten's PMA package for sparse PCA. Witten and Tibshirani's paper on sparse PCA provides some insight into some of their downstream work on sparse methods, including Sparse Clustering.  
+[Paper Link here](https://rss.onlinelibrary.wiley.com/doi/full/10.1111/rssb.12360)
+
+
+# Data Set
+
+I compared a dataset pertaining to house sales in Colorado in 2014-15. There are only 4 quantitative fields used. 
+```{r}
+predicted_house_numeric <- predicted_house %>% select(YEAR_BUILT,BEDROOMS, TOT_BATH,ACRES)
+predicted_house_numeric_scale <- predicted_house_numeric %>% scale(center = TRUE, scale = TRUE)
+```
+
+
+# PCA Comparison
+
+## Sparse PCA
+
+Here we look at the tuning parameter for sparse PCA. 
+```{r}
+# --------------------- # 
+#### PCA Comparisons ####
+# --------------------- #
+
+#standard pca - already standardized
+pc1 <- prcomp(predicted_house_numeric_scale, center = FALSE, scale = FALSE)
+summary(pc1)
+
+
+#sparse pca using Witten's PMA package - no optimization/tuning
+pc_sparse1 <- SPC(predicted_house_numeric_scale, K = 3, sumabsv = 1.5)
+pc_sparse1$prop.var.explained
+
+
+#play with the tuning a bit
+pcv <- SPC.cv(predicted_house_numeric_scale, nfolds = 5, niter = 10, sumabsv = seq(1,1.9, by = 0.1))
+plot(pcv)
+pcv$bestsumabsv
+pcv$bestsumabsv1se
+```
+
+## Sparcl
+
+Interestingly, HCP seems to work more slowly than does the sparse PCA on the same data. It does appear to select the "best W" value based on the 1SE rule used in the sparse PCA version above - although the documentation mentions that this value is selected as the best gap statistic. 
+
+It's not entirely clear how often the optimal tuning paramter "w" from will match the optimal "sumabsv" tuning paramter from the Sparse PCA package. 
+
+```{r}
+library(sparcl)
+
+hcp <- HierarchicalSparseCluster.permute(predicted_house_numeric_scale, wbounds = seq(1.1,1.9, by = 0.1))
+
+#print "best" w
+hcp$bestw
+plot(hcp$wbounds, hcp$gaps, type = "l")
+points(hcp$wbounds, hcp$gaps, type = "p", pch = 20, col = "orange3")
+
+
+```
+
+
+
+
+
+
+
