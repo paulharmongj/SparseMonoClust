@@ -1,0 +1,569 @@
+---
+title: "Clustering Hole-By-Hole Score Trajectories In Golf"
+author: "Paul Harmon, M.S. and Dr. Mark Greenwood"
+date: "`r format(Sys.time(), ' %B %d, %Y')`"
+output: 
+  beamer_presentation:
+    theme: Warsaw
+    colortheme: wolverine
+    fonttheme: structureBold
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(ggplot2);library(dplyr);library(magrittr)
+library(GGally)
+library(readr)
+library(monoClust)
+#source('~/Doctoral Work/monoClust/R/MonoClust.R')
+library(cluster)
+library(fpc)
+library(tidyr)
+
+## ggplot method for this: (from https://joey711.github.io/phyloseq/gap-statistic.html)
+plot_clusgap = function(clusgap, title="Gap Statistic calculation results"){
+  library(ggplot2)
+  gstab = data.frame(clusgap$Tab, k=1:nrow(clusgap$Tab))
+  p = ggplot(gstab, aes(k, gap)) + geom_line() + geom_point(size=5)
+  p = p + geom_errorbar(aes(ymax=gap+SE.sim, ymin=gap-SE.sim), color = "tomato2", alpha = .6)
+  p = p + ggtitle(title) + theme_bw() + theme(plot.title = element_text(hjust = 0.5))
+  return(p)
+}
+
+
+#### MC1 allows for use of MonoClust in ClustGap function
+MC1 <- function(x, k){
+  xnew <- as.data.frame(x)
+  temp <- MonoClust(xnew, nclusters = k)
+  
+return(list(cluster = temp$Membership))}
+
+#### Cluster Gap Plot Function
+## ggplot method for this: (from https://joey711.github.io/phyloseq/gap-statistic.html)
+plot_clusgap = function(clusgap, title="Gap Statistic calculation results"){
+  library(ggplot2)
+  gstab = data.frame(clusgap$Tab, k=1:nrow(clusgap$Tab))
+  p = ggplot(gstab, aes(k, gap)) + geom_line() + geom_point(size=5)
+  p = p + geom_errorbar(aes(ymax=gap+SE.sim, ymin=gap-SE.sim), color = "tomato2", alpha = .6)
+  p = p + ggtitle(title) + theme_bw() + theme(plot.title = element_text(hjust = 0.5))
+  return(p)
+}
+
+#### Hierarchical Clustering (with Ward's distance)
+
+## Hierarchical clustering (standard)
+hclusCut <- function(x, k, d.meth = "euclidean", ...){
+  list(cluster = cutree(hclust(dist(x, method=d.meth), method = "ward.D2",...), k=k))
+}
+
+
+#### SparseGap Function
+SparseGap <- function(x, wbounds = seq(1.2, 4.5, by = 0.1)){
+  
+  xnew <- as.matrix(x) 
+  hs1 <- HierarchicalSparseCluster.permute(xnew, wbounds = wbounds)
+  bestw <- hs1$bestw #define because sparseclust1 will want this later
+  
+  hs2 <- HierarchicalSparseCluster(xnew, wbound = bestw)
+  ## Round Clustering ## 
+  gs_sparse_golf <- clusGap(x, FUN = hclusCut, K.max = 12, B = 100, spaceH0 = "original", d.power = 2)
+  #gs_sparse_golf
+  p <- plot_clusgap(gs_sparse_golf)
+  
+  return(list(output = gs_sparse_golf, plot = p, sparseclustering = hs2))
+}
+
+## Function that you run through the clusGap with sparse clustering
+sparseclust1 <- function(x, k, wb = bestw){
+  xnew <- as.matrix(x)
+ # hs1 <- HierarchicalSparseCluster.permute(xnew, wbounds = eq(1.2,3.7, by = 0.5))
+  temp <- HierarchicalSparseCluster(xnew, wbound = bestw)
+  Membership <- cutree(temp$hc, k = k)
+return(list(cluster = Membership))}
+
+#### Generate a cumulative sum (for cum sum side of things)
+## calculate cumulative sum
+GenerateCumSum <- function(g1, ncol = 18){
+  scoredat <- matrix(0, nrow = nrow(g1), ncol = ncol)
+  for(j in 1:nrow(g1)){
+    scoredat[j,] <- cumsum(c(g1[j,1:ncol]))  
+    
+  }
+  return(scoredat)
+}
+
+```
+
+
+```{r us18, eval = TRUE, include =  FALSE}
+#### Alternative Methods ####
+
+#reads in all 4 days of the 2018 US Open
+g1 <- read_csv("~/Doctoral Work/Golf Example/Round1.csv")
+g2 <- read_csv("~/Doctoral Work/Golf Example/Round2.csv")
+g3 <- read_csv("~/Doctoral Work/Golf Example/Round3.csv")
+g4 <- read_csv("~/Doctoral Work/Golf Example/Round4.csv")
+
+g1$Day <- rep("Day1", nrow(g1))
+g2$Day <- rep("Day2", nrow(g2))
+g3$Day <- rep("Day3",nrow(g3))
+g4$Day <- rep("Day4", nrow(g4))
+
+## Merge players who did not make the cut (for first 2 rounds only)
+
+golf_f2 <- merge(g1[,1:19], g2[,1:19], by = "NameKey")
+
+## Merge Players who made the cut
+#Did the Player make the cut
+made_cut <- g3$NameKey
+
+g1_cut <- filter(g1, NameKey %in% made_cut)
+g2_cut <- filter(g2, NameKey %in% made_cut)
+golf_all <- merge(g1_cut[,1:19], g2_cut[,1:19], by = "NameKey")
+golf_all <- merge(golf_all, g3[,1:19], by = "NameKey")
+golf_all <- merge(golf_all, g4[,1:19], by = "NameKey")
+names(golf_all) <- c("NameKey", paste0("R1:",1:18), paste0("R2:",1:18), paste0("R3:",1:18), paste0("R4:",1:18))
+  
+#
+golf_all$Top5 <- ifelse(golf_all$NameKey %in% c("BrooksKoepka", "TommyFleetwood", "DustinJohnson","PatrickReed","TonyFinau"), "Contender","NonContender")
+
+
+```
+
+
+## Introduction
+
+::: columns
+
+:::: column
+Hi! I'm a PhD Candidate in Statistics at Montana State University. My research (along with Dr. Mark Greenwood) focuses on monothetic clustering with extensions to sparse methods. Much of the intent of this research was to explore these methods with an interesting use case pertaining to golf - my favorite sport.
+
+
+
+::::
+
+:::: column
+\center{\textcolor{orange}{Agenda:}}
+\newline
+
+This project considers a novel way to think about clustering golfers based on their hole-by-hole scores. We will cover the following topics:
+
++ Background: Overview of Golf
++ Methods: Clustering
++ Data: Score Trajectories
++ Cluster Results
++ Discussion
+
+::::
+
+:::
+
+
+
+
+
+## Golf Overview
+
+Over the course of an 18 hole round, an amateur might try to average a bogey per hole.  A PGA tour pro would try to score below even par. 
+
+Key Terms: 
+
++ **Par**: (0) - The target number of strokes per hole
++ **Birdie**:(-1) - A score of one less than par
++ **Bogey**: (+1) - A score of par plus one stroke
+
+In professional tournaments, score keeping is typically done with respect to par - a golfer with a score of -5 has shot a score of 5 under par for that tournament (67 on a par-72 course). 
+
+## Research in Golf
+
+Statistical research into golf typically is done at the aggregate-level (total scores in tournaments, total number of shots, etc.) or at a shot-level (swing-speed, shot-level data). 
+
+Our goal is to consider data at the hole-by-hole level, using scores to generate **interpretable results** that can be assessed in real time during a round. 
+
+
+## The Data: 2018 US Open
+
+::: columns
+
+:::: column
+We examine the 2018 US Open at Shinnecock Hills, NY. 
+
++ 4 rounds - June 14-17, 2018
++ $n_1=156$ players, with $n_2 = 67$ in rounds 3 and 4. 
+
+**Why the 2018 US Open?**: Shinnecock Hills proved to be a difficult course during this tournament. Changing weather/conditions drove differences in player performance and helped fuel two players (Tommy Fleetwood and Tony Finau) into contention with the eventual winner, Brooks Koepka.
+::::
+
+:::: column
+
+```{r includeimage1, echo=FALSE, fig.cap="Shinnecock Hills Golf Course", out.width = "90%"}
+knitr::include_graphics("C:/Users/paulh/Downloads/Shinnecock.jpg")
+
+#The figure will appear on the right side of the slide...
+```
+::::
+
+:::
+
+
+## Score Trajectories: Round 3
+
+```{r score_traj, eval = TRUE, warning = FALSE, message = FALSE}
+g3$PlayerName <- case_when(g3$NameKey %in% c("BrooksKoepka") ~ "A. Brooks Koepka",
+                           g3$NameKey %in% c("TonyFinau") ~ "B. Tony Finau",
+                           g3$NameKey %in% c("TommyFleetwood") ~ "C. Tommy Fleetwood",
+                           TRUE ~ "Other")
+g3$PlayerAlpha <- ifelse(g3$PlayerName %in% "Other", .5, .9)
+g3$Size <- ifelse(g3$PlayerName %in% "Other", 2, 1)
+g3_filter <- filter(g3, NameKey %in% c("BrooksKoepka","TonyFinau","TommyFleetwood"))
+
+ggparcoord(g3,columns = 1:18, groupColumn = 27, splineFactor = 2, alphaLines = "PlayerAlpha", showPoints = TRUE, scale = "globalminmax") + ggtitle("US Open Round 3 Trajectories (Smoothed)") + theme_bw()  + scale_alpha(guide = 'none') + scale_x_continuous("Hole", breaks = 1:18, labels = 1:18) + scale_color_viridis_d(option = "B", begin = 0.2, end = 0.9, direction = -1, alpha = .5) + ylab("Score to Par")
+```
+
+## Tournament-Wide Trajectories
+
+Considers all 4 rounds as a single trajectory. 
+```{r wide_traj, message = FALSE, warning = FALSE}
+golf_all$Alpha <- ifelse(golf_all$Top5 %in% "Contender", .9, .3)
+ggparcoord(golf_all,columns = 2:73, groupColumn = 74, splineFactor = 2, alphaLines = "Alpha", showPoints = TRUE, scale = 'globalminmax') + ggtitle("Stitched Tournament Score Trajectories (All 4)") + theme_bw() + scale_color_viridis_d(option = "B", begin = 0.2, end = 0.9, direction = 1) + xlab("Hole") + ylab("Score To Par")+ scale_alpha(guide = 'none') + scale_x_continuous("Hole", breaks = 1:72, labels = rep(1:18, times = 4))
+```
+
+
+## Tournament-Wide Cumulative Trajectories
+
+Examines cumulative scores throughout the 4 day tournament. 
+```{r cumulative, message = FALSE, warning = FALSE}
+scoredat <- GenerateCumSum(g1)
+## reconstruct the dataset
+pga1 <- cbind(scoredat, select(g1, NameKey))
+pga1$Final <- ifelse(pga1$`18`>0, "Above Par", ifelse(pga1$`18` == 0,"Even","Below Par")) %>% factor()
+
+
+#### Try this with Rounds 2-4
+scoredat2 <- GenerateCumSum(g2)
+scoredat3 <- GenerateCumSum(g3)
+scoredat4 <- GenerateCumSum(g4)
+scoredatAll <- rbind(scoredat, scoredat2,scoredat3,scoredat4)
+scoredatFull <- GenerateCumSum(golf_all[,2:73], ncol = 72) %>% as.data.frame()
+
+
+
+## reconstruct the dataset
+colnames(scoredatFull) <- c(paste0("R1:",1:18), paste0("R2:",1:18), paste0("R3:",1:18), paste0("R4:",1:18))
+pgafull <- cbind(scoredatFull,golf_all$NameKey)
+names(pgafull)[73] <- "NameKey"
+pgafull$Top3 <- case_when(pgafull$NameKey %in% c("BrooksKoepka") ~ "A. Brooks Koepka",
+                           pgafull$NameKey %in% c("TonyFinau") ~ "B. Tony Finau",
+                           pgafull$NameKey %in% c("TommyFleetwood") ~ "C. Tommy Fleetwood",
+                           TRUE ~ "Other") %>% factor()
+
+pga2 <- cbind(scoredat2, select(g2, NameKey))
+pga2$Final <- ifelse(pga2$`18`>0, "Above Par", ifelse(pga2$`18` == 0,"Even","Below Par")) %>% factor()
+
+pga3 <- cbind(scoredat3, select(g3, NameKey))
+pga3$Final <- ifelse(pga3$`18`>0, "Above Par", ifelse(pga3$`18` == 0,"Even","Below Par")) %>% factor()
+
+pga4 <- cbind(scoredat4, select(g4, NameKey))
+pga4$Final <- ifelse(pga4$`18`>0, "Above Par", ifelse(pga4$`18` == 0,"Even","Below Par")) %>% factor()
+
+pgaAll <-  scoredatAll %>% data.frame()
+pgaAll$NameKey <- c(g1$NameKey,g2$NameKey,g3$NameKey,g4$NameKey) 
+colnames(pgaAll) <- c(1:18,"NameKey")
+pgaAll$Final <- ifelse(pgaAll$`18`>0, "Above Par", ifelse(pgaAll$`18` == 0,"Even","Below Par")) %>% factor()
+
+# ------------------------------- #
+#### Parallel Coordinate Plots 
+# ------------------------------- #
+## Stacked
+ggparcoord(pgafull,columns = 1:72, groupColumn = 'Top3', splineFactor = 1, alphaLines = .5, showPoints = FALSE, scale = 'globalminmax') + ggtitle("US Open All Rounds Cumulative Trajectory") + theme_classic() + scale_color_viridis_d(option = "D", begin = 0.2, end = 0.9) + xlab("Hole") + geom_vline(aes(xintercept = 18), color = "tomato", linetype = 2) + 
+  geom_vline(aes(xintercept = 36), color = "tomato", linetype = 2) + geom_vline(aes(xintercept = 54), color = "tomato", linetype = 2) + scale_x_continuous("Hole", breaks = 1:72, labels = rep(1:18, times = 4)) + ylab("Cumulative Score")
+```
+
+
+
+## Clustering
+
+Clustering is an *unsupervised* statistical method by which groups of like observations can be identified in data (Everitt et al, 2011). 
+
+**Key Ideas**: 
+
++ Can we separate players into **data-driven groups** that share characteristics, based on the data observed? 
++ How many groups should there be?
+
+The work of *interpreting* clusters is often the most interesting part of a cluster analysis. Some clustering methods produce clusters that are easy to interpret - others are not as clear. 
+
+
+## Monothetic Clustering
+
+Monothetic Clustering (Chavent, 1998) is a *divisive*, *hierarchical* clustering method that seeks to partition data into groups by making recursive splits on single variables at a time. 
+
+Seeks to minimize **inertia**:  $$I(C_k) = \sum_{i \in C_k} d^2_{euc}(y_i,\bar{y}_{c_k})$$
+
+**Benefit**: Clusters are easy to interpret using *dendrogram*. 
+
+R Package *monoClust* (Tran, 2020) used to generate clusters. 
+
+## Monothetic Cluster Analysis
+
+```{r}
+mc2 <- MonoClust(as.data.frame(g3[,1:18]), nclusters = 3)
+g3$Cluster <- mc2$membership %>% as.factor()
+
+## Look at stacked version
+#ggparcoord(g3,columns = 1:18, groupColumn = "Cluster", splineFactor = 2, alphaLines = .6, showPoints = TRUE, scale = "globalminmax") + ggtitle("Round 3 Clusters") + theme_bw() + scale_color_viridis_d(option = "B", begin = 0.2, end = 0.9, direction = 1) + scale_alpha(guide = 'none') + scale_x_continuous("Hole", breaks = 1:18, labels = 1:18)
+
+colors = c(viridis::inferno(3, begin = 0, end = .7))
+  
+par(mar = c(2,2,2,2))
+#this is where we'd put in the dendrogram
+plot(mc2, main = "3-Cluster Dendrogram", cols = colors, col.type = "b")
+legend('bottomright', fill = colors, legend = as.vector(g3[c(25,19,58),]$"NameKey"), title = "Representative", bg = "gray90", box.col = "gray50", box.lty = 2)
+
+```
+
+
+
+## Faceted View 
+
+The three clusters differ appreciably in a handful of places (holes 13 and 15).
+```{r 3clust, include = TRUE, message = FALSE, warning = FALSE, fig.height = 6}
+## Look at Clusters with faceting (can't do with ggparcoord)
+names(g3)[1:18] <- 1:18
+g3_df <- gather(g3, key = "Hole", value = "Score", 1:18)
+g3_df$Hole <- g3_df$Hole %>% as.character() %>% as.numeric()
+ggplot(g3_df) + geom_line(aes(Hole, Score, color = Cluster, group = NameKey), alpha = .5) + scale_color_discrete(guide = 'none') + facet_wrap(~Cluster) + geom_point(aes(Hole, Score, color = Cluster)) + ggtitle("3 Cluster Solution") + theme_bw() + geom_smooth(aes(Hole, Score, color = Cluster), method = 'gam', formula = y ~ s(x, bs = 'cr'), fill = "gold3") + scale_color_viridis_d(option = "B", end = .7)
+
+
+g3$Total <- apply(g3[,1:18], 1, sum)
+#generates the average scores
+g3$Hole15 <- g3$`15`
+g3$Hole13 <- g3$`13`
+
+```
+
+
+## Monothetic Splits: Hole 15
+
+```{r hole15, fig.align = 'center'}
+## Assess the 15th hole
+#g3 %>% group_by(Cluster) %>% summarize(mean = mean(Hole15))
+
+ggplot(g3) + geom_violin(aes(Cluster, Hole15), fill = "grey40", alpha = 0.15) + geom_label(aes(Cluster, Hole15, color = Cluster, label = last_name), nudge_y = 0.2, size =3) + theme_bw() + ggtitle("Distributions of 15th Hole Scores") + scale_color_viridis_d(option = "B", end = .7) + geom_hline(aes(yintercept = 1.5), linetype = 2, color = "tomato")
+## Clearly discriminates players who double bogeyed 13 
+
+```
+
+## Monothetic Splits: Hole 13
+
+```{r hole13, fig.align = 'center'}
+
+
+## Assess the 13th hole
+#g3 %>% group_by(Cluster) %>% summarize(mean = mean(Hole13))
+
+ggplot(g3) + geom_violin(aes(Cluster, Hole13), fill = "grey40", alpha = 0.15) + geom_label(aes(Cluster, Hole13, color = Cluster, label = last_name), size =3) + theme_bw() + ggtitle("Distributions of 13th Hole Scores") + scale_color_viridis_d(option = "B", end = .7) + geom_hline(aes(yintercept = 1.5), linetype = 2, color = "tomato")
+## Clearly discriminates players who double bogeyed 13 
+
+```
+
+
+
+
+## 3 Clusters
+
+::: columns
+
+:::: column
+Splits are made based on just two holes in this solution - holes 13 and 15. Why? 
+
++ Phil Mickelson - famously struck a moving ball on 13 and carded a 6-over par
++ Extreme difficulty of the greens on these holes
++ Majority of players (in cluster A) managed a bogey or better on both holes
+::::
+
+:::: column
+
+
+```{r your-chunk-name, echo=FALSE}
+knitr::include_graphics("C:/Users/paulh/Downloads/PhilMickelson.jpeg")
+
+#The figure will appear on the right side of the slide...
+```
+::::
+
+:::
+
+
+
+## Average Scores By Cluster
+
+```{r, fig.align = 'center', fig.cap = "Clusters group by score, but not completely.", warning = FALSE, message = FALSE}
+
+#generates the average scores
+#g3 %>% group_by(Cluster) %>% summarize(mean = mean(Total))
+
+ggplot(g3) + geom_violin(aes(Cluster,Total), fill = "gold3",color = "orange4", alpha = 0.25) + geom_label(aes(Cluster, Total, color = Cluster, label = last_name), size =5) + theme_bw() + ggtitle("Distributions of Round Scores") + scale_color_viridis_d(option = "B", end = .7)
+```
+
+
+
+
+
+## Optimal Number of Clusters
+
+How do we determine the optimal number of clusters *objectively*? The **Gap Statistic** (Tibshirani, 2001) allows us to identify an optimal cluster solution by comparing the within-cluster dispersion generated from a given cluster solution to one generated from a structure-less null distribution. The bigger the gap, the more optimal the solution.
+
+To reduce complexity of a clustering solution, we follow Tibshirani's One-SE rule in measuring optimal gap. 
+
+We examine the gap statistic evaluated at a range of cluster numbers. 
+
+
+```{r mc1, eval = TRUE, echo = FALSE, warning = FALSE, message = FALSE}
+golfmat <- as.data.frame(pgafull[,1:18])
+mc1<- MonoClust(golfmat, nclusters = 2)
+```
+
+
+```{r gap1, eval = FALSE, warning = FALSE, message = FALSE}
+golf_full <- rbind(g1,g2,g3,g4)
+golf_full_mat <- golf_full[,1:18] %>% as.data.frame()
+
+# Hclust
+
+hclusCut <- function(x, k, d.meth = "euclidean", ...)
+  list(cluster = cutree(hclust(dist(x, method=d.meth), method = "ward.D2",...), k=k))
+
+```
+
+## Calinski-Harabasz Index
+
+An alternative metric for identifying the optimal number of clusters is the **Calinski-Harabasz** index, which compares the **between-cluster** dispersion $B(K)$ with **intra-cluster** dispersion $W(K)$ for a given solution.  Good cluster solutions will have less intra-cluster dispersion, meaning that larger CH values are better. 
+
+$$ Pseudo_F = \frac{B(K)/(K-1)}{W(K)/(n-K)}$$ 
+
+```{r ch1, message = FALSE, warning = FALSE}
+### Calinski-Harabasz Index (instead of Gap)
+chIndex <- function(dat, nk = 10, title = "CH Plot"){
+  nk <- 10
+  ch_vec <- rep(0,nk)
+  for(j in 1:nk){
+    km <- MonoClust(as.data.frame(dat[,1:18]),nclusters = j)
+    ch_vec[j] <- round(calinhara(dat[,1:18],km$membership),digits=2)
+  }
+  
+  df <- tibble(K = 1:nk, CH_Index = ch_vec)
+  ggplot(df, aes(K, CH_Index)) + geom_line(color = "yellowgreen") + geom_point(color = "dodgerblue", size = 2) + theme_bw() + ggtitle(title) + scale_x_continuous(breaks = 1:nk, labels = 1:nk)
+  
+}
+```
+
+
+## Is Clustering Reasonable?
+
+These clusters are certainly interesting.  However, we have not asked the question of what the **selected** number of clusters ought to be. We can use the *Gap Statistic* and *CH Index* to answer this question. 
+
++ **Gap Statistic**: Can be evaluated for any $k=1,...$, so a 1-cluster solution would indicate that clustering at all is not warranted. 
+
++ **CH Index**: Evaluated for $k>2$ clusters - be careful with results that indicate 2 clusters are optimal (Tran, 2019). 
+
+Let's take a look at these results for the 2018 US Open Round 3 score trajectories with monothetic cluster analysis. 
+
+## Gap Statistic
+
+```{r, warning = FALSE, message = FALSE}
+#Look at the gap statistic
+gs_mc_golf4 <- clusGap(g3[,1:18], FUN = hclusCut, K.max = 10,B = 70, spaceH0 = "original", d.power = 2)
+#gs_mc_golf4
+plot_clusgap(gs_mc_golf4) + scale_x_continuous("Number of Clusters", breaks =1:10)
+
+```
+
+
+## CH Index Results
+```{r, message = FALSE, warning = FALSE}
+
+## Datasets
+#chIndex(g1[,1:18], nk = 10, title = "CH Plot: Round 1")
+#chIndex(g2[,1:18], nk = 10, title = "CH Plot: Round 2")
+chIndex(g3[,1:18], nk = 10, title = "CH Plot: Round 3")
+#chIndex(g4[,1:18], nk = 10, title = "CH Plot: Round 4")
+#chIndex(golf_full[,1:18], nk = 10, title = "CH Plot: All Rounds")
+
+
+```
+
+
+## Discussion
+
+Interestingly, this analysis suggests a lack of clearly-defined clusters in the data.  This means that of the 67 golfers who played through the 2018 US Open, there was a lack of consistent scoring patterns throughout the 18 holes. Some things to consider: 
+
++ Choice of **metric** could influence results - CH index indicates 2 cluster solution, whereas Gap statistic suggests 1 cluster (providing little evidence of distinct clusters)
++ Minimal clear **structure** in trajectories: Scores on one hole appear to not correlate with scores on subsequent holes
++ **Uniqueness** in trajectories: There is no "one way" to play through the golf course
++ **Lack of variation** in scores: Very few scores differed more than a stroke from par in either direction
+
+
+## Next Steps
+
+In particular, an implementation of *sparse* monothetic clustering, which would allow monothetic splits to be made on a subset of holes. This is one chapter of my disseration - our methodology for doing this is still in progress. 
+
+**Potential Benefit**: Sparse monothetic clustering would allow for an initial step of 'cleaning up' noise features in the data. (In this case, holes that don't drive structure.) Then, cluster splits would be able to better take advantage of meaningful signal. 
+
+**Ex**: Say, golfers only differ meaningfully on holes 3,5,7,9, and 13.  Using **sparse monothetic clustering** we can penalize the distance matrix used in the monothetic clustering solution, and effectively remove the contribution from the other holes into our cluster solution. 
+
+
+
+
+## Selected Sources
+
+
++ Caliński, T., and Harabasz, J. (1974). *A dendrite method for cluster analysis*. Communications in Statistics,  1–27.
++ Chavent, M. (1998). *A monothetic clustering method*. Pattern Recognition Letters, 19(11), 989–996. 
++  Everitt, B. and Hothorn, T. (2011). *An Introduction to Applied Multivariate Analysis with R*. 1st ed. Springer. 
++ Tran, T.V., McGuire, B., and Greenwood, M. (2020). *monoClust: Perform Monothetic Clustering with  Extensions to Circular Data*. R package version 1.1.0. https://CRAN.R-project.org/package=monoClust
++ Tran, T. V. (2019). *Monothetic Cluster Analysis with Extensions to Circular and Functional Data*. Doctoral Thesis. Montana State University - Bozeman. 
++ Tibshirani, R., Walther, G., Hastie, T. (2002). *Estimating the number of clusters in a data set via the gap statistic*. Royal Statistical Society, 411-423. 
+
+
+## Appendix 
+
+## Other Applications
+
+Score trajectories may be considered in several settings: 
+
++ Multiple players over a single/multiple rounds (*as shown*)
++ Single player over many rounds 
+
+This methodology may be more useful when examining a single golfer, particularly at the amateur level.  In this case, the major source of structure/variation would be differences in rounds, rather than differences in players.  Additionally, assessing the "clusterability" of the score trajectories (Ackerman, et al., 2008) might help avoid this structural issue. 
+
++ Ackerman, M., and Ben-David, S. (2008). *Measures of clustering quality: A working set of axioms for clustering*. Advances in Neural Information Processing Systems, 121–128.
+
+## Cluster Memebership
+
+Some key members of each cluster: 
+
+-------------      --------------       -----------------------
+**Cluster A**       **Cluster B**         **Cluster C**
+-------------      --------------       ----------------------- 
+Jimmy Walker       *Brooks Koepka*      Justin Thomas
+Scott Piercy       Daniel Berger        Bryson DeChambeau
+Rickie Fowler      Tommy Fleetwood      Patrick Rodgers
+Pat Perez          Tony Finau           Jason Dufner
+-------------      --------------       -----------------------
+
+
+```{r, eval = FALSE}
+table(g3$NameKey,g3$Cluster)
+##plot the tree
+#plot(mc1)
+
+
+```
+
+## Extra Material (Ignore)
+
++ **Related Trajectories**: On golfers (2 or 4 rounds if they made the cut)
++ **Order of play**: Some players started on hole 1, others on hole 10
+
+
+

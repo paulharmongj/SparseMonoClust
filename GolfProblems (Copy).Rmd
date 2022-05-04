@@ -1,0 +1,443 @@
+---
+title: "GolfProblems (Copy)"
+author: "Paul Harmon"
+date: "r format(Sys.time(), ' %B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tibble)
+library(ggplot2)
+library(dplyr)
+library(GGally)
+```
+
+# Introduction
+
+This document overviews the cluster analysis of PGA golf data from the 2018 US Open played at Shinnecock Hills GC, NY.  I am overviewing a series of clustering methods attempted on this data, using several different methods. 
+
+The beginning portion of this document focuses on hole-by-hole treatment of score profiles, whereas the second part of the document focuses on the **cumulative score profile**.  The second is the preferred method, and is where we see the best performance from a clustering algorithm. 
+
+The goal is to step through this document and see different ways to consider the data:
+
++ Hole By Hole Profiles (Stacked)
++ Hole By Hole Profiles (Stitched)
++ Cumulative Profiles (Stacked)
++ Cumulative Profiles (Stitched)
+
+After examining three tournaments (the US Open 2018, US Open 2020, and 2019 Masters), I have found that these score profiles tend to follow similar dynamics.  In general, hole-by-hole profiles typically do not provide a ton of structure.  On the other hand, inducing structure by taking a cumulative sum leads to higher variation in the data at later holes.  Stitching cumulative profiles exacerbates this problem.  I have found some structure in solutions where I try to stitch all 4 days together but when using the Lasso, I see all the early holes get 0'd out and later holes drive all the signal. 
+
+
+
+
+# Hole-by-Hole Profiles
+
+This documents some clustering done on hole-by-hole profiles. After finding little clusterable structure in these data, we decided to instead look at cumulative methods. 
+
+```{r}
+## Code to step through the Cluster analysis on the golf data
+
+# ---------------------------------------------------------------------------------------------------#
+#### Libarary packages and read in Monoclust                                                     #####
+#  --------------------------------------------------------------------------------------------------# 
+#ClusGap example with Monothetic clustering
+library(cluster)
+## Source the MonoClust Function
+source('~/Doctoral Work/monoClust/R/MonoClust.R')
+
+# --------------------------------------------------------------------------------------------------#
+#### Read in some Data                                                                          #####
+# --------------------------------------------------------------------------------------------------#
+golf <- read_csv("~/Doctoral Work/Golf Example/Round3.csv")
+#table(golf$back_nine)
+golf2 <- dplyr::filter(golf, back_nine == FALSE)
+dim(golf2)
+
+golfmat <- as.data.frame(golf[,1:18])
+golfmat2 <- as.data.frame(golf2[,1:18])
+#mc1<- MonoClust(golfmat, nclusters = 2)
+
+### Need function to interface with the Gap Statisic calculator 
+## argument 1 is the dataset, argument 2 is K
+## output is a list
+MC1 <- function(x, k){
+  xnew <- as.data.frame(x)
+  temp <- MonoClust(xnew, nclusters = k)
+  
+return(list(cluster = temp$Membership))}
+
+```
+
+```{r ruspini, include = FALSE, eval = FALSE}
+#Try it on the ruspini dataset
+gs_mc_RU <- clusGap(ruspini, FUN = MC1, K.max = 8, B = 60, spaceH0 = "original")
+gs_mc_RU
+plot(gs_mc_RU, main = "Gap statistic for the 'ruspini' data")
+mtext("k = 4 is best .. and  k = 5  pretty close")
+```
+
+```{r plotmethod, eval = TRUE, echo = FALSE}
+## ggplot method for this: (from https://joey711.github.io/phyloseq/gap-statistic.html)
+plot_clusgap = function(clusgap, title="Gap Statistic calculation results"){
+  library(ggplot2)
+  gstab = data.frame(clusgap$Tab, k=1:nrow(clusgap$Tab))
+  p = ggplot(gstab, aes(k, gap)) + geom_line() + geom_point(size=5)
+  p = p + geom_errorbar(aes(ymax=gap+SE.sim, ymin=gap-SE.sim), color = "tomato2", alpha = .6)
+  p = p + ggtitle(title) + theme_bw() + theme(plot.title = element_text(hjust = 0.5))
+  return(p)
+}
+
+## HclusCut
+## Hierarchical clustering (standard)
+hclusCut <- function(x, k, d.meth = "euclidean", ...){
+  list(cluster = cutree(hclust(dist(x, method=d.meth), method = "ward.D2",...), k=k))
+}
+```
+
+Using Monothetic clustering and hierarichal clustering, we see that there is little appreciable signal in the round 3 data.  (Note - this is a similar story across all 4 rounds.)
+```{r, cache = TRUE}
+## Now we can try this on the Golf data (on Round 3 ONLY)
+gs_mc_golf <- clusGap(golfmat, FUN = hclusCut, K.max = 8, B = 60)
+gs_mc_golf
+plot_clusgap(gs_mc_golf) #this is a problem
+
+
+
+## try with removal of 2, 4, 7, 11, 13, 17 (from previous)
+
+gs_mc_golf2 <- clusGap(golfmat2[,-c(2,4,7,11,13,17)], FUN = hclusCut, K.max = 8, B = 60)
+gs_mc_golf2
+plot_clusgap(gs_mc_golf2)
+
+
+#### Other clustering methods: ####
+
+## partitioning around medoids
+#gs_mc_golf3 <- clusGap(golfmat2, FUN = pam, K.max = 8, B = 60)
+#gs_mc_golf3
+#plot_clusgap(gs_mc_golf3)
+
+
+gs_mc_golf2 <- clusGap(golfmat2, FUN = hclusCut, K.max = 8, B = 100, spaceH0 = "scaledPCA", d.power = 2)
+gs_mc_golf2
+plot_clusgap(gs_mc_golf2) + ggtitle("Scaled PCA Version")
+```
+
+An investigation into all 4 rounds at once shows the following - lack of structure even when examining ALL 4 rounds simultaneously.  We think this may be because the individual holes (features) are a little too independent of each other. We aren't able to show shared structure across holes.  
+
+```{r}
+#### Alternative Methods ####
+
+#reads in all 4 days
+g1 <- read_csv("~/Doctoral Work/Golf Example/Round1.csv")
+g2 <- read_csv("~/Doctoral Work/Golf Example/Round2.csv")
+g3 <- read_csv("~/Doctoral Work/Golf Example/Round3.csv")
+g4 <- read_csv("~/Doctoral Work/Golf Example/Round4.csv")
+```
+
+
+```{r}
+#With 2020
+g1 <- read_csv("~/Doctoral Work/Golf Example/2020Round1.csv")
+g2 <- read_csv("~/Doctoral Work/Golf Example/2020Round2.csv")
+g3 <- read_csv("~/Doctoral Work/Golf Example/2020Round3.csv")
+g4 <- read_csv("~/Doctoral Work/Golf Example/2020Round4.csv")
+
+#2019
+g1 <- read_csv("~/Doctoral Work/Golf Example/2019MastersRound1.csv")
+g2 <- read_csv("~/Doctoral Work/Golf Example/2019MastersRound2.csv")
+g3 <- read_csv("~/Doctoral Work/Golf Example/2019MastersRound3.csv")
+g4 <- read_csv("~/Doctoral Work/Golf Example/2019MastersRound4.csv")
+
+
+
+g1$Day <- rep("Day1", nrow(g1))
+g2$Day <- rep("Day2", nrow(g2))
+g3$Day <- rep("Day3",nrow(g3))
+g4$Day <- rep("Day4", nrow(g4))
+
+golf_full <- rbind(g1,g2,g3,g4)
+golf_full_mat <- g2[,1:18] %>% as.data.frame()
+
+#Look at the gap statistic
+gs_mc_golf4 <- clusGap(golf_full_mat, FUN = MC1, K.max = 10, B = 60, spaceH0 = "original", d.power = 2)
+gs_mc_golf4
+plot_clusgap(gs_mc_golf4)  + scale_x_continuous("Number of Clusters", breaks =1:10)
+
+
+## Plot G2
+g2$cluster <- sparseclust1(g1[,1:18], k = 2, wb = s2$sparseclusters$wbound)$cluster %>% factor()
+ggparcoord(g4,columns = 1:18, groupColumn = NULL, splineFactor = 2, alphaLines = .5, showPoints = TRUE, scale = 'globalminmax') + ggtitle("Overall Tournament Score Trajectories") + theme_bw() + scale_color_viridis_d(option = "B", begin = 0.2, end = 0.9) + xlab("Hole") + theme(legend.position = "none")
+
+```
+
+
+#Alternate Plan: Stitched Days
+
+This section overviews a version of the profiles where each tournament is stitched together. 
+
+## Re-Setting:
+
+This version involves re-setting each curve at the score that the player received on the first hole. 
+
+```{r}
+#fix names
+names(g1)[1:18] <- paste0("R1:",1:18)
+names(g2)[1:18] <- paste0("R2:",1:18)
+names(g3)[1:18] <- paste0("R3:",1:18)
+names(g4)[1:18] <- paste0("R4:",1:18)
+
+#Did the Player make the cut
+made_cut <- g3$NameKey
+
+
+g1_cut <- filter(g1, NameKey %in% made_cut)
+g2_cut <- filter(g2, NameKey %in% made_cut)
+golf_all <- merge(g1_cut[,1:19], g2_cut[,1:19], by = "NameKey")
+golf_all <- merge(golf_all, g3[,1:19], by = "NameKey")
+golf_all <- merge(golf_all, g4[,1:19], by = "NameKey")
+
+                 
+#names(golf_all) <- c(paste0("R1:",1:18), paste0("R2:",1:18), paste0("R3:",1:18), paste0("R4:",1:18))
+  
+#
+golf_all$Top5 <- ifelse(golf_all$NameKey %in% c("BrooksKoepka", "TommyFleetwood", "DustinJohnson","PatrickReed","TonyFinau"), "Contender","NonContender")
+
+## Visualize
+ggparcoord(golf_all,columns = 2:73, groupColumn = 74, splineFactor = 2, alphaLines = .5, showPoints = TRUE, scale = 'globalminmax') + ggtitle("Overall Tournament Score Trajectories") + theme_bw() + scale_color_viridis_d(option = "B", begin = 0.2, end = 0.9) + xlab("Hole")
+```
+
+
+## Gap Statistic
+
+```{r}
+gs_hc_gf <- clusGap(golf_all[,2:73], FUN = hclusCut, K.max = 12, B = 100, spaceH0 = "original", d.power = 2)
+gs_hc_gf
+plot_clusgap(gs_hc_gf)
+```
+
+## Sparse
+
+```{r}
+SparseGap <- function(x, wbounds = seq(1.2, 4.5, by = 0.1)){
+  
+  xnew <- as.matrix(x) 
+  hs1 <- HierarchicalSparseCluster.permute(xnew, wbounds = wbounds)
+  bestw <- hs1$bestw #define because sparseclust1 will want this later
+  
+  ## Round Clustering ## 
+  gs_sparse_golf <- clusGap(x, FUN = hclusCut, K.max = 12, B = 100, spaceH0 = "original", d.power = 2)
+  #gs_sparse_golf
+  p <- plot_clusgap(gs_sparse_golf)
+  
+  return(list(output = gs_sparse_golf, plot = p))
+}
+## Visualize the clusters (from round 3)
+
+s1 <- SparseGap(g1[,1:18])
+s2 <- SparseGap(g2[,1:18])
+s3 <- SparseGap(g3[,1:18])
+s4 <- SparseGap(g4[,1:18])
+s_all <- SparseGap(golf_all[,2:37])
+
+s1$plot
+s1$output
+
+HierarchicalSparseCluster
+
+```
+
+
+
+
+#Alternate Plan: Cumulative Score Distributions
+
+Rather than using the score profiles on hole-by-hole, we can take cumulative distributions. This gives the benefit of the player having their final score on the 18th observation, and the curves will actually separate out. 
+
+```{r cumsumfunction, include = TRUE}
+#### Analysis for a SINGLE day
+## calculate cumulative sum
+GenerateCumSum <- function(g1, ncol = 18){
+  scoredat <- matrix(0, nrow = nrow(g1), ncol = ncol)
+  for(j in 1:nrow(g1)){
+    scoredat[j,] <- cumsum(c(g1[j,1:ncol]))  
+    
+  }
+  return(scoredat)
+}
+```
+
+
+The data look like the following: 
+
+```{r}
+scoredat <- GenerateCumSum(g1)
+## reconstruct the dataset
+pga1 <- cbind(scoredat, select(g1, NameKey, first_name, last_name, country, tee_time, back_nine))
+pga1$Final <- ifelse(pga1$`18`>0, "Above Par", ifelse(pga1$`18` == 0,"Even","Below Par")) %>% factor()
+
+#Parallel Coordinate Plot
+
+ggparcoord(pga1,columns = 1:18, groupColumn = 25, splineFactor = 1, alpha = .5) + ggtitle("US Open Round 1 Cumulative Trajectory") + theme_bw() + scale_color_viridis_d(option = "D", begin = 0.2, end = 0.9) + xlab("Hole")
+
+
+#### Try this with Rounds 2-4
+scoredat2 <- GenerateCumSum(g2)
+scoredat3 <- GenerateCumSum(g3)
+scoredat4 <- GenerateCumSum(g4)
+scoredatFull <- GenerateCumSum(golf_all[,2:73], ncol = 72) %>% as.data.frame()
+
+
+
+## reconstruct the dataset
+colnames(scoredatFull) <- c(paste0("R1:",1:18), paste0("R2:",1:18), paste0("R3:",1:18), paste0("R4:",1:18))
+pgafull <- cbind(scoredatFull,golf_all$NameKey)
+names(pgafull)[73] <- "NameKey"
+pgafull$top5 <- ifelse(pgafull$NameKey %in% c("BrooksKoepka", "TommyFleetwood", "DustinJohnson","PatrickReed","TonyFinau"), "Contender","NonContender")
+
+pga2 <- cbind(scoredat2, select(g2, NameKey, first_name, last_name, country, tee_time, back_nine))
+pga2$Final <- ifelse(pga2$`18`>0, "Above Par", ifelse(pga2$`18` == 0,"Even","Below Par")) %>% factor()
+
+pga3 <- cbind(scoredat3, select(g3, NameKey, first_name, last_name, country, tee_time, back_nine))
+pga3$Final <- ifelse(pga3$`18`>0, "Above Par", ifelse(pga3$`18` == 0,"Even","Below Par")) %>% factor()
+
+pga4 <- cbind(scoredat4, select(g4, NameKey, first_name, last_name, country, tee_time, back_nine))
+pga4$Final <- ifelse(pga4$`18`>0, "Above Par", ifelse(pga4$`18` == 0,"Even","Below Par")) %>% factor()
+
+#Parallel Coordinate Plot
+
+ggparcoord(pgafull,columns = 1:72, groupColumn = 74, splineFactor = 1, alphaLines = .5, showPoints = FALSE, scale = 'globalminmax') + ggtitle("US Open All RoundsCumulative Trajectory") + theme_bw() + scale_color_viridis_d(option = "D", begin = 0.2, end = 0.9) + xlab("Hole")
+
+ggparcoord(pga2,columns = 1:18, groupColumn = 25, splineFactor = 1, alphaLines = .5, showPoints = TRUE, scale = 'globalminmax') + ggtitle("US Open Round 2 Cumulative Trajectory") + theme_bw() + scale_color_viridis_d(option = "D", begin = 0.2, end = 0.9) + xlab("Hole")
+
+ggparcoord(pga3,columns = 1:18, groupColumn = 25, splineFactor = 2, alphaLines = .5, showPoints = TRUE, scale = 'globalminmax') + ggtitle("US Open Round 3 Cumulative Trajectory") + theme_bw() + scale_color_viridis_d(option = "D", begin = 0.2, end = 0.9) + xlab("Hole")
+
+ggparcoord(data = pga4, columns = 1:18, groupColumn = 25, showPoints = TRUE, scale = 'globalminmax', splineFactor = 2, alphaLines = .5) + ggtitle("US Open Round 4 Cumulative Trajectory") + theme_bw() + scale_color_viridis_d(option = "A", begin = 0.1, end = .9) + xlab("Hole")
+```
+
+
+Note that we can already see some structure present that wasn't there before. While I have little doubt that we'll be able to better identify clusters in the data, the question will be how *many* clusters appear. 
+
+
+
+```{r}
+gs_hc_golf2 <- clusGap(pgafull[,1:72], FUN = hclusCut, K.max = 20, B = 100, spaceH0 = "original", d.power = 2)
+gs_hc_golf2
+plot_clusgap(gs_hc_golf2)
+```
+
+
+```{r}
+##### Cluster Analysis With Gap ####
+
+## Round 1 ## 
+## hclusCut
+gs_hc_golf2 <- clusGap(pga1[,1:18], FUN = hclusCut, K.max = 12, B = 100, spaceH0 = "original", d.power = 2)
+gs_hc_golf2
+plot_clusgap(gs_hc_golf2)
+
+## MonoClust
+gs_mc_golf2 <- clusGap(pga4[,1:18], FUN = MC1, K.max = 8, B = 100, spaceH0 = "original", d.power = 2)
+
+gs_mc_golf2
+plot_clusgap(gs_mc_golf2)
+
+
+## Round 3 ## 
+gs_hc_golf3 <- clusGap(pga3[,1:18], FUN = hclusCut, K.max = 12, B = 100, spaceH0 = "original", d.power = 1)
+gs_hc_golf3
+plot_clusgap(gs_hc_golf3)
+
+
+## All Rounds ##
+
+pgafull <- rbind(pga1,pga2,pga3,pga4)
+
+```
+
+
+## Sparse Clustering
+
+Instead, we try sparse clustering - this has the benefit of weighting the holes going into the distance matrix so we can either have them go all the way to zero or contribute more/less to the cluster solution.  Given that we are seeing it pick the maximum number of clusters at each interval, we might be able to better identify structure by picking out only the relevant holes. 
+
+Tuning method used here: 
+
++ **First**: Pick the optimal amount of smoothing
++ **Second**: *Given* that optimal w, use Gap statistic to identify the best cluster size K
+```{r sparseclust, include = TRUE}
+#### Try Sparse Clustering
+## output is a list
+library(sparcl)
+
+## Function that you run through the clusGap with sparse clustering
+sparseclust1 <- function(x, k, wb = bestw){
+  xnew <- as.matrix(x)
+ # hs1 <- HierarchicalSparseCluster.permute(xnew, wbounds = eq(1.2,3.7, by = 0.5))
+  temp <- HierarchicalSparseCluster(xnew, wbound = bestw)
+  Membership <- cutree(temp$hc, k = k)
+return(list(cluster = Membership))}
+
+# Function that runs clusGap for each of the rounds 
+
+SparseGap <- function(x, wbounds = seq(1.2, 4.5, by = 0.1)){
+  
+  xnew <- as.matrix(x) 
+  hs1 <- HierarchicalSparseCluster.permute(xnew, wbounds = wbounds)
+  bestw <- hs1$bestw #define because sparseclust1 will want this later
+  hsclust <- HierarchicalSparseCluster(xnew, wbound = bestw)
+  ## Round Clustering ## 
+  gs_sparse_golf <- clusGap(x, FUN = sparseclust1, K.max = 12, B = 100, spaceH0 = "original", d.power = 2)
+  #gs_sparse_golf
+  p <- plot_clusgap(gs_sparse_golf)
+  
+  return(list(output = gs_sparse_golf, plot = p, sparseclusters = hsclust))
+}
+## Visualize the clusters (from round 3)
+
+s1 <- SparseGap(pga1[,1:18])
+s2 <- SparseGap(pga2[,1:18])
+s3 <- SparseGap(pga3[,1:18])
+s4 <- SparseGap(pga4[,1:18])
+
+s5 <- SparseGap(pgafull[,1:72])
+
+```
+
+
+### Deep Dive into Round 4
+
+In round 4, there were 67 golfers that competed. 
+```{r}
+
+##Actually re-calculate the cluster
+
+sparseclust4 <- HierarchicalSparseCluster(as.matrix(pga4[,1:18]),wbound = s4$optimalw)
+pga4$Cluster <- cutree(sparseclust4$hc, k = 4) %>% as.factor()#based on optimal
+
+## Visualize:
+winner <- pga4 %>% filter(NameKey %in% "BrooksKoepka")
+
+library(ggrepel)
+mylabs = pga4$NameKey
+ggparcoord(data = pga4, columns = 1:18, groupColumn = 26, showPoints = TRUE, scale = 'globalminmax', splineFactor = 2, alphaLines = .5) + ggtitle("US Open Round 4 Cumulative Trajectory") + theme_bw() + scale_color_viridis_d(option = "A", begin = 0.1, end = .9) + xlab("Hole")
+
+# Filter to only a couple players
+pga4_filter <- filter(pga4, NameKey %in% c("BrooksKoepka", "TommyFleetwood", "DustinJohnson","PatrickReed","TonyFinau"))
+ggparcoord(data = pga4_filter, columns = 1:18, groupColumn = 26, showPoints = TRUE, scale = 'globalminmax', splineFactor = 2, alphaLines = .5) + ggtitle("US Open Round 4: Tournament Winner vs. Best Round 4") + theme_bw() + scale_color_viridis_d(option = "A", begin = 0.1, end = .9) + xlab("Hole")
+
+
+#+ geom_label(aes(label = rep(mylabs,18),hjust = 1,na.rm = TRUE)
+```
+
+
+
+
+
+
+

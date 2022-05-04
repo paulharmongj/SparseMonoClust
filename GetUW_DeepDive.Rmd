@@ -1,0 +1,929 @@
+---
+title: "Get UW Function Deep Dive"
+author: "Paul Harmon"
+date: "`r format(Sys.time(), ' %B %d, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(magrittr);library(dplyr);library(ggplot2)
+library(sparcl)
+
+```
+
+```{r silent, eval = TRUE, echo = FALSE, include = FALSE}
+# this file contains the hidden functions for the sparcl package
+ 
+GetWCSS <- function(x, Cs, ws=NULL){
+  wcss.perfeature <- numeric(ncol(x))
+  for(k in unique(Cs)){
+    whichers <- (Cs==k)
+    if(sum(whichers)>1) wcss.perfeature <- wcss.perfeature + apply(scale(x[whichers,],center=TRUE, scale=FALSE)^2, 2, sum)
+  }
+  bcss.perfeature <- apply(scale(x, center=TRUE, scale=FALSE)^2, 2, sum)-wcss.perfeature
+  if(!is.null(ws)) return(list(wcss.perfeature=wcss.perfeature, wcss=sum(wcss.perfeature), wcss.ws=sum(wcss.perfeature*ws),
+                               bcss.perfeature=bcss.perfeature))
+  if(is.null(ws)) return(list(wcss.perfeature=wcss.perfeature, wcss=sum(wcss.perfeature), bcss.perfeature=bcss.perfeature))
+}
+ 
+UpdateCs <- function(x, K, ws, Cs){
+  x <- x[,ws!=0]
+  z <- sweep(x, 2, sqrt(ws[ws!=0]), "*")
+  nrowz <- nrow(z)
+  mus <- NULL
+  if(!is.null(Cs)){
+    for(k in unique(Cs)){
+      if(sum(Cs==k)>1) mus <- rbind(mus, apply(z[Cs==k,],2,mean))
+      if(sum(Cs==k)==1) mus <- rbind(mus, z[Cs==k,])
+    }
+  }
+  if(is.null(mus)){
+    km <- kmeans(z, centers=K, nstart=10)
+  } else {
+    distmat <- as.matrix(dist(rbind(z, mus)))[1:nrowz, (nrowz+1):(nrowz+K)]
+    nearest <- apply(distmat, 1, which.min)
+    if(length(unique(nearest))==K){
+      km <- kmeans(z, centers=mus)
+    } else {
+      km <- kmeans(z, centers=K, nstart=10)
+    }
+  }
+  return(km$cluster)
+}
+
+#distmat <- function(x){
+#  return(dist(x))
+#}
+
+BinarySearch <- function(argu,sumabs){
+  if(l2n(argu)==0 || sum(abs(argu/l2n(argu)))<=sumabs) return(0)
+  lam1 <- 0
+  lam2 <- max(abs(argu))-1e-5
+  iter <- 1
+  while(iter<=15 && (lam2-lam1)>(1e-4)){
+    su <- soft(argu,(lam1+lam2)/2)
+    if(sum(abs(su/l2n(su)))<sumabs){
+      lam2 <- (lam1+lam2)/2
+    } else {
+      lam1 <- (lam1+lam2)/2
+    }
+    iter <- iter+1
+  }
+  return((lam1+lam2)/2)
+}
+
+soft <- function(x,d){
+  return(sign(x)*pmax(0, abs(x)-d))
+}
+
+l2n <- function(vec){
+  return(sqrt(sum(vec^2)))
+}
+
+GetUW <- function(ds, wbound,niter,uorth,silent){
+  # uorth would be a $n^2 x k$ matrix containing $k$ previous
+  # dissimilarity matrices found, if we want to do sparse comp clust
+  # after having already done $k$ of these things
+  # Example:
+  # out <- HierarchicalSparseCluster(x,wbound=5)
+  # out2 <- HierarchicalSparseCluster(x,wbound=5, uorth=out$u)
+  # Then out2 contains a sparse complementary clustering
+  p <- ncol(ds)
+  w <- rep(1/p, p)*wbound
+  iter <- 1
+  if(!is.null(uorth)){
+    if(sum(abs(uorth-t(uorth)))>1e-10) stop("Uorth must be symmetric!!!!!!!!!!")
+    uorth <- matrix(uorth[lower.tri(uorth)],ncol=1)
+    uorth <- uorth/sqrt(sum(uorth^2))
+  }
+  u <- rnorm(nrow(ds))
+  w <- rep(1, ncol(ds))
+  w.old <- rnorm(ncol(ds))
+#  u.old <- rnorm(nrow(ds))
+  while(iter<=niter && (sum(abs(w.old-w))/sum(abs(w.old)))>1e-4){#(sum(abs(u.old-u))/sum(abs(u.old)))>1e-4){ # was 1e-3 and involved ws until 11.12.09
+    if(!silent) cat(iter,fill=FALSE)
+#    u.old <- u
+    if(iter>1) u <- ds[,argw>=lam]%*%matrix(w[argw>=lam],ncol=1) 
+    if(iter==1) u <- ds%*%matrix(w,ncol=1)
+    if(!is.null(uorth)) u <- u - uorth%*%(t(uorth)%*%u)
+    iter <- iter+1
+    u <- u/l2n(u)
+    w.old <- w
+    argw <- matrix(pmax(matrix(u,nrow=1)%*%ds,0),ncol=1) 
+    lam <- BinarySearch(argw,wbound)
+    w <- soft(argw,lam) # Don't need to normalize b/c this will be done soon
+    w <- w/l2n(w)
+  } 
+  u <-  ds[,argw>=lam]%*%matrix(w[argw>=lam],ncol=1)/sum(w)
+  if(!is.null(uorth)) u <- u - uorth%*%(t(uorth)%*%u)
+  u <- u/l2n(u)
+  w <- w/l2n(w)
+  crit <- sum(u*(ds%*%matrix(w,ncol=1)))
+  u2 <- matrix(0,nrow=ceiling(sqrt(2*length(u))),ncol=ceiling(sqrt(2*length(u))))
+  u2[lower.tri(u2)] <- u
+  u <- as.matrix(as.dist(u2))/sqrt(2)
+  return(list(u=u, w=w, crit=crit))
+}
+
+ 
+UpdateWs <- function(x, Cs, l1bound){
+  wcss.perfeature <- GetWCSS(x, Cs)$wcss.perfeature
+  tss.perfeature <- GetWCSS(x, rep(1, nrow(x)))$wcss.perfeature
+  lam <- BinarySearch(-wcss.perfeature+tss.perfeature, l1bound)
+  ws.unscaled <- soft(-wcss.perfeature+tss.perfeature,lam)
+  return(ws.unscaled/l2n(ws.unscaled))
+}
+
+
+output.cluster.files.fun <- function(x,out,outputfile.prefix,genenames=NULL,genedesc=NULL){
+         p=ncol(x)
+         n=nrow(x)
+         geneids=dimnames(x)[[2]]
+         samplenames=dimnames(x)[[1]]
+         if(is.null(geneids)) geneids <- paste("Gene", 1:ncol(x))
+         if(is.null(samplenames)) samplenames <- paste("Sample",1:nrow(x))
+         if(is.null(genenames)){genenames=geneids}
+         if(is.null(genedesc)){genedesc <- rep("", ncol(x))}
+
+         xx=x[,out$ws!=0]
+         geneids.subset=geneids[out$ws!=0]
+         genenames.subset=genenames[out$ws!=0]
+         genedesc.subset=genedesc[out$ws!=0]
+         pp=ncol(xx)
+         sample.order=out$hc$order
+          samplenames.o=samplenames[sample.order]
+         arrynames=paste("ARRY",as.character(sample.order),"X",sep="")
+         feature.order=1:pp
+   if(!is.null(out$hc.features)){feature.order=out$hc.features$order}
+    xx.o=xx[sample.order,feature.order]
+    geneids.subset.o=geneids.subset[feature.order]
+    genenames.subset.o=genenames.subset[feature.order]
+    genedesc.subset.o=genedesc.subset[feature.order]
+    genex=paste("GENE",as.character(1:pp),"X",sep="")
+    genex.o=genex[feature.order]
+    arrynames.o=arrynames[sample.order]
+
+# output cdt
+	file=paste(outputfile.prefix,".cdt",sep="")
+         xprefix <- rbind(c("GID","UID","NAME","GWEIGHT",samplenames.o),c("AID","","","",arrynames))
+         xbig <- matrix(NA, ncol=(n+4),nrow=pp)
+         for(i in 1:pp){
+           xbig[i,] <- c(genex.o[i],geneids.subset.o[i],genedesc.subset.o[i],"1",xx.o[,i]) # was xx
+         }
+         xbig <- rbind(xprefix,xbig)
+         write.table(file=file,xbig,col.names=FALSE,row.names=FALSE,sep="\t",quote=FALSE)
+	
+	#output atr file
+	atr=out$hc$merge
+	atr.new=atr
+	for(i in 1:nrow(atr)){
+	 for(j in 1:2){
+	   if(atr[i,j]<0){atr.new[i,j]=paste("ARRY",as.character(abs(atr[i,j])),"X",sep="")}
+	   if(atr[i,j]>0){atr.new[i,j]=paste("NODE",as.character(abs(atr[i,j])),"X",sep="")}
+	}}
+        col1=paste("NODE",as.character(1:nrow(atr.new)),"X",sep="")
+	atr.new=cbind(col1,atr.new,1-out$hc$height/2)
+	output.matrix(atr.new, paste(outputfile.prefix,".atr",sep=""))
+	
+	if(!is.null(out$hc.features)){
+	#output gtr file
+	gtr=out$hc.features$merge
+	gtr.new=gtr
+	for(i in 1:nrow(gtr)){
+	 for(j in 1:2){
+	   if(gtr[i,j]<0){gtr.new[i,j]=paste("GENE",as.character(abs(gtr[i,j])),"X",sep="")}
+	   if(gtr[i,j]>0){gtr.new[i,j]=paste("NODE",as.character(abs(gtr[i,j])),"X",sep="")}
+	}}
+        col1=paste("NODE",as.character(1:nrow(gtr.new)),"X",sep="")
+	gtr.new=cbind(col1,gtr.new,1-out$hc.features$height/2)
+	output.matrix(gtr.new, paste(outputfile.prefix,".gtr",sep=""))
+}
+
+return()
+}
+
+
+output.matrix <- function(x,file){
+  write.table(file=file,x,quote=FALSE, sep="\t", row.names=FALSE, col.names=FALSE)
+}
+
+
+
+read.gct <- function(file) {
+        if (is.character(file))
+        if (file == "")
+            file <- stdin()
+        else {
+            file <- file(file, "r")
+            on.exit(close(file))
+        }
+        if (!inherits(file, "connection"))
+        stop("argument `file' must be a character string or connection")
+
+   # line 1 version
+        version <- readLines(file, n=1)
+
+        # line 2 dimensions
+        dimensions <- scan(file, what=list("integer", "integer"), nmax=1, quiet=TRUE)
+        rows <- dimensions[[1]]
+        columns <- dimensions[[2]]
+        # line 3 Name\tDescription\tSample names...
+        column.names <- read.table(file, header=FALSE, quote='', nrows=1, sep="\t", fill=FALSE, comment.char='')
+        column.names <-column.names[3:length(column.names)]
+
+
+        if(length(column.names)!=columns) {
+                stop(paste("Number of sample names", length(column.names), "not equal to the number of columns", columns, "."))
+        }
+
+        colClasses <- c(rep(c("character"), 2), rep(c("double"), columns))
+
+        x <- read.table(file, header=FALSE, quote="", row.names=NULL, comment.char="", sep="\t", colClasses=colClasses, fill=FALSE)
+        row.descriptions <- as.character(x[,2])
+        data <- as.matrix(x[seq(from=3, to=dim(x)[2], by=1)])
+
+        column.names <- column.names[!is.na(column.names)]
+
+        colnames(data) <- column.names
+        row.names(data) <- x[,1]
+        return(list(row.descriptions=row.descriptions, data=data))
+}
+
+
+extract.prefix <- function(file){
+#  i=0
+#  while(substring(file,i,i)!="." & (i <nchar(file))) {i=i+1}
+#  if(i==nchar(file)){stop('Error in file name')}
+#  pre=substring(file,1,i-1)
+#  return(pre)
+  tmp <- strsplit(file,"\\.")[[1]]
+  return(paste(tmp[-length(tmp)],collapse="."))
+}
+```
+
+
+
+# Literature Review for Sparse Clustering
+
+Clustering has long been a primary tool for data scientists to determine groups in unsupervised data problems (CITE). When no clear groups are identified, clustering can be used to identify common charactersitsics between observations and to group them into similar groups based either on single charactersistics or on relationships between many characteristics.
+
+However, in many cases, data may contain many features. Not all of those features will be likely to contain predictive signal (CITE). Sparse clustering attempts to reduce the number of features used as input in a clustering problem in order to drive better results, for several reasons.  In some cases, such as high-dimensional settings where the number of observations $n$ is less than the number of data features $p$, some clustering algorithms will perform poorly or break down completely (CITE).  However, the data need not be high-dimensional to pose potential problems for clustering algorithms; in many cases, the true number of signal-bearing features may be less than the total number of features available to be used - these remaining "noise features" can actually hamper the ability of the algorithm to segregate the data into groups that best represent the truth. 
+
+In clustering, as in many statistics problems, Occam's Razor applies - the simplest, parsimonious solution tends to provide the best results.  In the case of sparse clustering, two critical advantages can be obtained by using only the signal-bearing features and removing the noise features; chiefly, the solution is more interpretable because it relies on fewer features and additionally, the cluster solution will be more accurate. 
+
+Witten and Tibshirani (2011) introduced a framework for sparse clustering in multiple settings: K-Means and Hierarchical Clustering.  In general, Witten and Tibshirani first pose the clustering problem in the following form: 
+
+$$\underset{(\Theta \in G)}{max} ~ ~ {\sum_{j=1}^{p}w_j f_j(X_j, \Theta)} $$ 
+Subject to three constraints: 
+
++ $$ ||w||_2^2 \leq 1 $$ 
++ $$ ||w||_1 |leq s$$ 
++ $$ w_j \geq 0$$
+
+In this case, $w_j$ refer to a set of weights that are applied to each feature and s is a tuning parameter that, like $\lambda$ in standard Lasso regression, controls how sparse the feature set used should be.   This provides a general framework wherein the first constraint, the squared L2 norm, assures that at least one feature will be nonzero. The L1 norm provides penalization that allows weights to be shrunk all the way to 0. 
+
+## Sparse K-Means Clustering 
+
+In a K-means setting, this can be directly utilized to optimize the dimensionality of the space used in the k-means algorithm.  A sparse K-means 
+
+ Witten and Tibshirani (2010) apply sparsity to clustering \via estimation a Lasso-penalized weighting of the variables $w_j$ used in dissimilarity matrix \textbf{D}. We denote the weighted dissimilarity matrix $D^*$. The below solution maximizes the between-cluster SS (BCSS) in K-means: 
+
+  $$ max_{(C_1,...C_k,w)} \sum_{j=1}^{J}w_j ~ ~[\frac{1}{n}\sum_{i} \sum_{i'} d_{i,i',j} - \sum_{k=1}^{K}\frac{1}{n_k}\sum_{i'i' \in C_k}d_{i,i',j}]$$
+   
+subject to  $\|w||_{2}^{2} \leq 1$ and $ ||w||_1 < s$.  
+
+Where $s$ is a tuning parameter and $w_j \geq 0 ~ \forall j$
+
+
+Much of the research following Witten and Tibshirani has focused on improvements to the sparse K-Means implementation. 
+
++ Robust Sparse K-Means ()
++ Simple Approach to Sparse Clustering ()
++ Add more papers to cite here
+
+
+## Sparse Hierarchical Clustering 
+
+A direct translation of this framework cannot be applied to hierarchical clustering in the way that it is applied to k-means clustering, because hierarchical clustering does not directly optimize a criterion in the above form.  This results because HC generates a dendrogram that provides a solution for all potential splits from the singleton cluster solution to the n-cluster solution - these have dendrograms have to be cut at a certain point to provide a single clustering. Witten and Tibshirani (2010) make the point that one could attempt to build a sparse hierarchical clustering algorithm that cuts the dendrogram, calculates the BCSS that results, and optimizes based on that criterion.  However, such a case would require a more obvious method for when and how to cut the dendrogram, and this is not a trivial problem. 
+
+However, Witten and Tibshirani develop a method that recasts the dissimilarity matrix $d_{i,i'}_{nxn}$ as the solution to the below optimization: 
+
+$$\underset{w, U \in R^{nxn}}{max} \{\sum_{j = 1}^{p}\sum_{i,i'=1}^{n} d_{i,i',j}U_{i,i'}\} $$
+Subject to the following constraints: 
+
++ $$ \sum_{i,i'=1}^{n} U^2_{i,i'} \leq 1$$ 
++ $$ ||w||_2^2 \leq 1 $$ 
++ $$ ||w||_1 |leq s$$ 
++ $$ w_j \geq 0$$
+
+
+The solution to the optimization uses components of Witten's Sparse Principal Component (2009) proposal.  The algorithm is as follows: 
+
++ Let $u$ be a vector of length $n^2$ containing all elements in $(U_{i,i'})_{nxn}$ strung out
++ D (termed dists in code) is $n^2 x p$ matrix whose jth columns contain the $n^2$ elements of $(d_{i,i',j})_{nxn}$ dissimilarity matrix based on the jth feature. 
+
+This yields: 
+
+$$ \underset{w,u}{max} (u^T Dw)$$ 
+subject to: 
+
++ $$ ||w||_2^2 \leq 1 $$ 
++ $$ ||w||_1 |leq s$$ 
++ $$ ||u||^2_2 \leq 1$$
+
+The code calculates these componeents w and u and iterates until convergence to get **both** the optimal weights w and the vectorized dissimilarity constraint $u$. 
+
+
+# The Code
+
+Witten and Tibshirani maintain a github repository with Sparcl's underlying code. The code is written in R but does have Fortran dependencies in two functions, distfun and multfun.  Additionally, a python implementation exists. 
+
++ Link to Github: https://github.com/cran/sparcl/
++ Link to Python: https://github.com/tsurumeso/pysparcl
++ Additional Link - StackExchange: https://stackoverflow.com/questions/14209851/sparse-clustering-using-the-sparcl-package-in-r?rq=1
+
+The central function that HierarchicalSparseCluster() uses is called GetUW(), and is shown below in its verbatim form. This document generates a test dataset and steps through the algorithm that does the optimization. GetUW() is really just a generalization of the sparse PCA formulation of Witten, Tibshirani and Hastie (2009), and it attempts to iterate through the following algorithm. 
+
+1. Initialize weights $w_j = \frac{1}{\sqrt{p}}$. 
+2. Iterate until convergence: 
+
++ Get u based on w:  $u = \frac{Dw}{||Dw||_2} $  
++ Get w based on u:  $ $ 
+
+This generates a vector $u$ that can then be rewritten as $nxn$ matrix **U**, and the standard clustering can then be performed on that newly sparse dissimilarity matrix. 
+
+```{r hidden_features, include = FALSE}
+GetUW <- function(ds, wbound,niter,uorth,silent){
+  # uorth would be a $n^2 x k$ matrix containing $k$ previous
+  # dissimilarity matrices found, if we want to do sparse comp clust
+  # after having already done $k$ of these things
+  # Example:
+  # out <- HierarchicalSparseCluster(x,wbound=5)
+  # out2 <- HierarchicalSparseCluster(x,wbound=5, uorth=out$u)
+  # Then out2 contains a sparse complementary clustering
+  p <- ncol(ds)
+  w <- rep(1/p, p)*wbound
+  iter <- 1
+  if(!is.null(uorth)){
+    if(sum(abs(uorth-t(uorth)))>1e-10) stop("Uorth must be symmetric!!!!!!!!!!")
+    uorth <- matrix(uorth[lower.tri(uorth)],ncol=1)
+    uorth <- uorth/sqrt(sum(uorth^2))
+  }
+  u <- rnorm(nrow(ds))
+  w <- rep(1, ncol(ds))
+  w.old <- rnorm(ncol(ds))
+#  u.old <- rnorm(nrow(ds))
+  while(iter<=niter && (sum(abs(w.old-w))/sum(abs(w.old)))>1e-4){#(sum(abs(u.old-u))/sum(abs(u.old)))>1e-4){ # was 1e-3 and involved ws until 11.12.09
+    if(!silent) cat(iter,fill=FALSE)
+#    u.old <- u
+    if(iter>1) u <- ds[,argw>=lam]%*%matrix(w[argw>=lam],ncol=1) 
+    if(iter==1) u <- ds%*%matrix(w,ncol=1)
+    if(!is.null(uorth)) u <- u - uorth%*%(t(uorth)%*%u)
+    iter <- iter+1
+    u <- u/l2n(u)
+    w.old <- w
+    argw <- matrix(pmax(matrix(u,nrow=1)%*%ds,0),ncol=1) 
+    lam <- BinarySearch(argw,wbound)
+    w <- soft(argw,lam) # Don't need to normalize b/c this will be done soon
+    w <- w/l2n(w)
+  } 
+  u <-  ds[,argw>=lam]%*%matrix(w[argw>=lam],ncol=1)/sum(w)
+  if(!is.null(uorth)) u <- u - uorth%*%(t(uorth)%*%u)
+  u <- u/l2n(u)
+  w <- w/l2n(w)
+  crit <- sum(u*(ds%*%matrix(w,ncol=1)))
+  u2 <- matrix(0,nrow=ceiling(sqrt(2*length(u))),ncol=ceiling(sqrt(2*length(u))))
+  u2[lower.tri(u2)] <- u
+  u <- as.matrix(as.dist(u2))/sqrt(2)
+  return(list(u=u, w=w, crit=crit))
+}
+
+ 
+UpdateWs <- function(x, Cs, l1bound){
+  wcss.perfeature <- GetWCSS(x, Cs)$wcss.perfeature
+  tss.perfeature <- GetWCSS(x, rep(1, nrow(x)))$wcss.perfeature
+  lam <- BinarySearch(-wcss.perfeature+tss.perfeature, l1bound)
+  ws.unscaled <- soft(-wcss.perfeature+tss.perfeature,lam)
+  return(ws.unscaled/l2n(ws.unscaled))
+}
+
+
+output.cluster.files.fun <- function(x,out,outputfile.prefix,genenames=NULL,genedesc=NULL){
+         p=ncol(x)
+         n=nrow(x)
+         geneids=dimnames(x)[[2]]
+         samplenames=dimnames(x)[[1]]
+         if(is.null(geneids)) geneids <- paste("Gene", 1:ncol(x))
+         if(is.null(samplenames)) samplenames <- paste("Sample",1:nrow(x))
+         if(is.null(genenames)){genenames=geneids}
+         if(is.null(genedesc)){genedesc <- rep("", ncol(x))}
+
+         xx=x[,out$ws!=0]
+         geneids.subset=geneids[out$ws!=0]
+         genenames.subset=genenames[out$ws!=0]
+         genedesc.subset=genedesc[out$ws!=0]
+         pp=ncol(xx)
+         sample.order=out$hc$order
+          samplenames.o=samplenames[sample.order]
+         arrynames=paste("ARRY",as.character(sample.order),"X",sep="")
+         feature.order=1:pp
+   if(!is.null(out$hc.features)){feature.order=out$hc.features$order}
+    xx.o=xx[sample.order,feature.order]
+    geneids.subset.o=geneids.subset[feature.order]
+    genenames.subset.o=genenames.subset[feature.order]
+    genedesc.subset.o=genedesc.subset[feature.order]
+    genex=paste("GENE",as.character(1:pp),"X",sep="")
+    genex.o=genex[feature.order]
+    arrynames.o=arrynames[sample.order]
+
+# output cdt
+	file=paste(outputfile.prefix,".cdt",sep="")
+         xprefix <- rbind(c("GID","UID","NAME","GWEIGHT",samplenames.o),c("AID","","","",arrynames))
+         xbig <- matrix(NA, ncol=(n+4),nrow=pp)
+         for(i in 1:pp){
+           xbig[i,] <- c(genex.o[i],geneids.subset.o[i],genedesc.subset.o[i],"1",xx.o[,i]) # was xx
+         }
+         xbig <- rbind(xprefix,xbig)
+         write.table(file=file,xbig,col.names=FALSE,row.names=FALSE,sep="\t",quote=FALSE)
+	
+	#output atr file
+	atr=out$hc$merge
+	atr.new=atr
+	for(i in 1:nrow(atr)){
+	 for(j in 1:2){
+	   if(atr[i,j]<0){atr.new[i,j]=paste("ARRY",as.character(abs(atr[i,j])),"X",sep="")}
+	   if(atr[i,j]>0){atr.new[i,j]=paste("NODE",as.character(abs(atr[i,j])),"X",sep="")}
+	}}
+        col1=paste("NODE",as.character(1:nrow(atr.new)),"X",sep="")
+	atr.new=cbind(col1,atr.new,1-out$hc$height/2)
+	output.matrix(atr.new, paste(outputfile.prefix,".atr",sep=""))
+	
+	if(!is.null(out$hc.features)){
+	#output gtr file
+	gtr=out$hc.features$merge
+	gtr.new=gtr
+	for(i in 1:nrow(gtr)){
+	 for(j in 1:2){
+	   if(gtr[i,j]<0){gtr.new[i,j]=paste("GENE",as.character(abs(gtr[i,j])),"X",sep="")}
+	   if(gtr[i,j]>0){gtr.new[i,j]=paste("NODE",as.character(abs(gtr[i,j])),"X",sep="")}
+	}}
+        col1=paste("NODE",as.character(1:nrow(gtr.new)),"X",sep="")
+	gtr.new=cbind(col1,gtr.new,1-out$hc.features$height/2)
+	output.matrix(gtr.new, paste(outputfile.prefix,".gtr",sep=""))
+}
+
+return()
+}
+
+
+output.matrix <- function(x,file){
+  write.table(file=file,x,quote=FALSE, sep="\t", row.names=FALSE, col.names=FALSE)
+}
+
+
+
+read.gct <- function(file) {
+        if (is.character(file))
+        if (file == "")
+            file <- stdin()
+        else {
+            file <- file(file, "r")
+            on.exit(close(file))
+        }
+        if (!inherits(file, "connection"))
+        stop("argument `file' must be a character string or connection")
+
+   # line 1 version
+        version <- readLines(file, n=1)
+
+        # line 2 dimensions
+        dimensions <- scan(file, what=list("integer", "integer"), nmax=1, quiet=TRUE)
+        rows <- dimensions[[1]]
+        columns <- dimensions[[2]]
+        # line 3 Name\tDescription\tSample names...
+        column.names <- read.table(file, header=FALSE, quote='', nrows=1, sep="\t", fill=FALSE, comment.char='')
+        column.names <-column.names[3:length(column.names)]
+
+
+        if(length(column.names)!=columns) {
+                stop(paste("Number of sample names", length(column.names), "not equal to the number of columns", columns, "."))
+        }
+
+        colClasses <- c(rep(c("character"), 2), rep(c("double"), columns))
+
+        x <- read.table(file, header=FALSE, quote="", row.names=NULL, comment.char="", sep="\t", colClasses=colClasses, fill=FALSE)
+        row.descriptions <- as.character(x[,2])
+        data <- as.matrix(x[seq(from=3, to=dim(x)[2], by=1)])
+
+        column.names <- column.names[!is.na(column.names)]
+
+        colnames(data) <- column.names
+        row.names(data) <- x[,1]
+        return(list(row.descriptions=row.descriptions, data=data))
+}
+
+
+extract.prefix <- function(file){
+#  i=0
+#  while(substring(file,i,i)!="." & (i <nchar(file))) {i=i+1}
+#  if(i==nchar(file)){stop('Error in file name')}
+#  pre=substring(file,1,i-1)
+#  return(pre)
+  tmp <- strsplit(file,"\\.")[[1]]
+  return(paste(tmp[-length(tmp)],collapse="."))
+}
+```
+
+
+
+## Build out an example
+
+We start out with an example data frame with 5 rows and 2 columns. 
+```{r}
+library(tibble)
+set.seed(92920)
+test_dat <- tibble(X1 = sample(1:10, 5), X2 = sample(1:5, 5))
+
+## Step through the first part of Hierarchical Sparse Cluster
+dists = NULL
+x = test_dat %>% as.matrix()
+source('C:/Users/paulh/Documents/Doctoral Work/Sparcl Witten/sparcl/R/distfun.R')
+source('C:/Users/paulh/Documents/Doctoral Work/Sparcl Witten/sparcl/R/multfun.R')
+library(sparcl)
+
+    # the below code sets NA values of x to 0 in xnona
+    xnona <- x
+    xnona[is.na(x)] <- 0
+    
+    #distfun is Rob Tibshirani's code. Wraps output from distfun into distance matrix
+    # distfun returns a vector - this code turns that (n*(n-1)/2 X p)-vector into a p-column matrix
+    dists <- matrix(distfun(xnona), ncol=ncol(x)) # Rob's Fortran code!!! - no missing values please
+    
+    print(xnona)
+    dists
+```
+
+From below, it looks like multfun only applies when dealing with NA values in the X matrix. In the example above, sum(is.na(x)>0) is going to be 0, so this entire block of code is skipped. 
+```{r part2, include= TRUE, eval = FALSE}
+
+
+    # If there are missing values in X (looking at individual elements)
+    if(sum(is.na(x))>0){
+      #generagtes a matrix of 1's with same dimensions as x
+      xbinary <- matrix(1, nrow=nrow(x),ncol=ncol(x))
+      #where x is NA, xbinary is now set to 0
+      xbinary[is.na(x)] <- 0
+      #I think multfun is a Tibshirani function. 
+      mult <- matrix(multfun(xbinary),ncol=ncol(x)) # mult equals 1 if neither elt is NA, and 0 if one or both is NA
+      
+#----------------------------#      
+#### Dissimilarity Choice ####
+#----------------------------#
+      
+      if(dissimilarity=="squared.distance"){
+        #calculates the squared distance dissimilarity - need to dig into this a bit
+        dists <- sweep(dists,1,sqrt(ncol(dists)/apply(mult!=0,1,sum)),"*")
+      } else if (dissimilarity=="absolute.value"){
+        #calculates an absolute value dissimilarity - ditto here
+        dists <- sweep(dists,1,ncol(dists)/apply(mult!=0,1,sum),"*")
+      }
+      #if mult =0, then set distances to 0
+      dists[mult==0] <- 0
+      
+      #nullifies the temporary variables (is this a best practice?)
+      mult <- NULL
+      xbinary <- NULL
+      xnona <- NULL
+    }
+```
+
+The next step is to actually calculate the clusterings - this is where we can get into the UW piece. 
+
+```{r}
+## set a few things to debug
+wbound = 1.5
+
+#----------------------------------#  
+#### Calculates the Clusterings ####
+#----------------------------------#
+  #sets default wbound value in case not specified by user
+  if(is.null(wbound)) wbound <- .5*sqrt(ncol(dists)) #since false, it ignores here
+  #solves issue with wbound below 1
+  if(wbound<=1) stop("Cannot have wbound <= 1") #not an issue here
+  
+  ## calculates the out value based on dissimilarity choice ##
+dissimilarity = "squared.distance"
+```
+
+See below, the code calls the GetUW function (specified below).  I am trying to figure out why they are able to get away with only passing the raw dists through GetUW in the absolute value case - unless it's because all the values are already positive? 
+
+In any case, GetUW does all the hard work in the background here - out is then passed into a list with each of the components as output for the sparcl function. 
+
+```{r show the code, include = TRUE, eval = FALSE}
+  ## GetUW is doing the iterative optimization that we need to dig into ## 
+### NOTE: the only difference between abs val and squared distance is the squared piece - is this right?
+  if (dissimilarity == "squared.distance") out <- GetUW(dists^2, wbound, niter = niter, uorth = uorth, silent = silent)
+  if (dissimilarity == "absolute.value")  out <- GetUW(dists, wbound, niter = niter, uorth = uorth, silent = silent)
+
+  # it looks like this uses hclust on the u matrix, with specified w, method, criterion, and distances. 
+  out <- list(hc = hclust(as.dist(out$u), method = method), ws = out$w, u = out$u, crit = out$crit, dists = dists, uorth = uorth, wbound = wbound)
+
+```
+
+## GetUW Deep Dive
+
+Let's take a look at the GetUW function. We'll keep passing our example through. 
+
+```{r}
+#for testing
+ds <- dists^2
+ds_abs <- dists
+
+
+#GetUW <- function(ds, wbound,niter,uorth,silent){
+  # uorth would be a $n^2 x k$ matrix containing $k$ previous
+  # dissimilarity matrices found, if we want to do sparse comp clust
+  # after having already done $k$ of these things
+  # Example:
+  # out <- HierarchicalSparseCluster(x,wbound=5)
+  # out2 <- HierarchicalSparseCluster(x,wbound=5, uorth=out$u)
+  # Then out2 contains a sparse complementary clustering
+
+# To match defaults in function call
+ niter = 15
+ uorth = NULL
+ silent = FALSE
+
+  p <- ncol(ds)
+  p
+  w <- rep(1/p, p)*wbound
+  w
+  
+  #initializes the iteration counter
+  iter <- 1
+  
+  #Default setting: uorth is set NULL#
+  # if a non-null uorth is passed, needs to be symmetric and is normalized
+  if(!is.null(uorth)){
+    if(sum(abs(uorth-t(uorth)))>1e-10) stop("Uorth must be symmetric!!!!!!!!!!")
+    uorth <- matrix(uorth[lower.tri(uorth)],ncol=1)
+    uorth <- uorth/sqrt(sum(uorth^2)) #this appears to be a vector
+  }
+
+## If uorth has dimensions n*(n-1)/2 as a vector - I think similar to fortran code. Uorth is returned as a vector
+ 
+ #u is initialized with normal 0,1, with one for each n*(n-1)/2 row in dists (OBJECT-OBJECT dissimilarities)
+ #w is initialized with 1's - for each FEATURE
+  u <- rnorm(nrow(ds))
+  w <- rep(1, ncol(ds))
+  
+  w.old <- rnorm(ncol(ds))
+#  u.old <- rnorm(nrow(ds)) (this was commented out by Witten - not sure why)
+```  
+  
+The below code is a while loop that builds out the optimization.  Two constraints are included: 
+
++ Number of iterations (capped at 15 in defaults)
++ Difference between weights achieves convergence
+
+This will continue to iterate until either of the above two constraints are satisfied. It appears that in early iterations of the function, the tolerances were slightly lower and the convergence was based on u rather than w. I do not understand why they made that change. 
+  
+```{r whileloop, include = TRUE, eval = TRUE}  
+# --------------------------------------------#  
+#### While Loop that does the optimization ####
+# --------------------------------------------#
+  
+  while(iter<=niter && (sum(abs(w.old-w))/sum(abs(w.old)))>1e-4){#(sum(abs(u.old-u))/sum(abs(u.old)))>1e-4){ # was 1e-3 and involved ws until 11.12.09
+    if(!silent) cat(iter,fill=FALSE) #Prints the iterations if SILENT = TRUE
+#    u.old <- u
+    
+    if(iter>1) u <- ds[,argw>=lam]%*%matrix(w[argw>=lam],ncol=1)  
+    if(iter==1) u <- ds%*%matrix(w,ncol=1)
+    if(!is.null(uorth)) u <- u - uorth%*%(t(uorth)%*%u)
+    iter <- iter+1
+    u <- u/l2n(u)
+    w.old <- w
+    argw <- matrix(pmax(matrix(u,nrow=1)%*%ds,0),ncol=1) 
+    lam <- BinarySearch(argw,wbound)
+    w <- soft(argw,lam) # Don't need to normalize b/c this will be done soon (Witten comment)
+    w <- w/l2n(w)
+  } 
+# This steps through   
+  
+# ------------------------------------ #  
+#### Final conversion to get output ####
+# ------------------------------------ #
+  
+  u <-  ds[,argw>=lam]%*%matrix(w[argw>=lam],ncol=1)/sum(w)
+  if(!is.null(uorth)) u <- u - uorth%*%(t(uorth)%*%u)
+  u <- u/l2n(u)
+  w <- w/l2n(w)
+  crit <- sum(u*(ds%*%matrix(w,ncol=1)))
+  u2 <- matrix(0,nrow=ceiling(sqrt(2*length(u))),ncol=ceiling(sqrt(2*length(u))))
+  u2[lower.tri(u2)] <- u
+  u <- as.matrix(as.dist(u2))/sqrt(2)
+  
+#Returns u, w, crit  
+#return(list(u=u, w=w, crit=crit))
+
+
+```
+
+I think it makes sense to step through several iterations to better understand how the matrix multiplication is happening. Let's look at the first couple iterations. 
+
+```{r}
+  
+iter = 1
+  #while(iter<=niter && (sum(abs(w.old-w))/sum(abs(w.old)))>1e-4){#(sum(abs(u.old-u))/sum(abs(u.old)))>1e-4){ # was 1e-3 and involved ws until 11.12.09
+    if(!silent) cat(iter,fill=FALSE) #Prints the iterations if SILENT = TRUE
+#    u.old <- u
+    
+#Starts here for Iteration 1
+     
+    if(iter==1) u <- ds%*%matrix(w,ncol=1)
+u   # is a vector 
+
+
+#Iterations 2 and onward
+ iter <- iter+1 #updates the iteration
+    u <- u/l2n(u) #calculates the l2norm (sqrt(sum(vec^2)))
+    u
+    w.old <- w #updates w.old (for previous iteration)
+    
+    #does 1xn*n-1/2 * n*n-1/2xp matrix multiplication, takes the parallel max of the resulting (1xp) matrix
+    # and then turns it into a column vector (seems like repetitive code)
+    argw <- matrix(pmax(matrix(u,nrow=1)%*%ds,0),ncol=1) 
+    argw
+```
+
+We introduce a slight diversion here - need to understand how Binary Search works. It's a custom function that Witten wrote. Basically, Binary search takes in two arguments - argu, the 
+
+```{r binsearch, include = TRUE, eval = TRUE}
+#### Binary Search #### 
+
+#BinarySearch is a function written by Witten
+    BinarySearch <- function(argu,sumabs){
+  if(l2n(argu)==0 || sum(abs(argu/l2n(argu)))<=sumabs) return(0)  
+  lam1 <- 0
+  lam2 <- max(abs(argu))-1e-5
+  iter <- 1
+  while(iter<=15 && (lam2-lam1)>(1e-4)){
+    su <- soft(argu,(lam1+lam2)/2)
+    if(sum(abs(su/l2n(su)))<sumabs){
+      lam2 <- (lam1+lam2)/2
+    } else {
+      lam1 <- (lam1+lam2)/2
+    }
+    iter <- iter+1
+  }
+  return((lam1+lam2)/2)
+    }
+
+```
+
+With that, we return to the working through iteration 1. 
+
+```{r iteration1continued, include = TRUE}
+    
+#### Back to Iteration 1 #### 
+    
+    lam <- BinarySearch(argw,wbound)
+lam
+## Soft is a function written by Witten:
+soft <- function(x,d){
+  return(sign(x)*pmax(0, abs(x)-d))
+}
+###################################
+
+    w <- soft(argw,lam) # Don't need to normalize b/c this will be done soon (Witten comment)
+    w
+    w <- w/l2n(w)
+    w
+
+#Now that we have updated w, we are in iteration 2
+    #pre-checks to calculate u in 2nd iteration
+    lam #
+    argw
+    ds[,argw >= lam]
+    
+    if(iter>1) u <- ds[,argw>=lam]%*%matrix(w[argw>=lam],ncol=1)
+     iter <- iter+1
+    u <- u/l2n(u)
+    w.old <- w
+    argw <- matrix(pmax(matrix(u,nrow=1)%*%ds,0),ncol=1) 
+    lam <- BinarySearch(argw,wbound)
+    w <- soft(argw,lam) # Don't need to normalize b/c this will be done soon (Witten comment)
+    w <- w/l2n(w)
+    w
+#and this would iterate to convergence
+
+```
+
+
+# Applications to PGA Data
+
+We can apply this function to the 2018 US Open data to see how it performs (without tuning). This would be the 'input' step to the sparse monothetic clustering algorithm that we would leverage the above components to use. 
+
+```{r}
+#load pga data
+library(readr)
+golf <- read_csv("~/Doctoral Work/Golf Example/Round3.csv")
+table(golf$back_nine)
+
+#filter to get 78 players who started on hole 1
+library(dplyr)
+gf <- golf %>% filter(back_nine == FALSE)
+
+```
+
+
+We input the golf data into the function:
+```{r}
+x <- gf[,1:18] %>% as.matrix()
+
+UWpaul <- function(wbound){
+# the below code sets NA values of x to 0 in xnona
+   xnona <- x 
+   xnona[is.na(x)] <- 0
+    
+    #distfun is Rob Tibshirani's code. Wraps output from distfun into distance matrix
+    # distfun returns a vector - this code turns that (n*(n-1)/2 X p)-vector into a p-column matrix
+    dists <- matrix(distfun(xnona), ncol=ncol(x)) # Rob's Fortran code!!! - no missing values please
+    
+    print(xnona)
+    dists
+# ------------ #    
+#### Step 2 ####
+# ------------ #
+       # If there are missing values in X (looking at individual elements)
+    if(sum(is.na(x))>0){
+      #generagtes a matrix of 1's with same dimensions as x
+      xbinary <- matrix(1, nrow=nrow(x),ncol=ncol(x))
+      #where x is NA, xbinary is now set to 0
+      xbinary[is.na(x)] <- 0
+      #I think multfun is a Tibshirani function. 
+      mult <- matrix(multfun(xbinary),ncol=ncol(x)) # mult equals 1 if neither elt is NA, and 0 if one or both is NA
+      
+#----------------------------#      
+#### Dissimilarity Choice ####
+#----------------------------#
+      
+      if(dissimilarity=="squared.distance"){
+        #calculates the squared distance dissimilarity - need to dig into this a bit
+        dists <- sweep(dists,1,sqrt(ncol(dists)/apply(mult!=0,1,sum)),"*")
+      } else if (dissimilarity=="absolute.value"){
+        #calculates an absolute value dissimilarity - ditto here
+        dists <- sweep(dists,1,ncol(dists)/apply(mult!=0,1,sum),"*")
+      }
+      #if mult =0, then set distances to 0
+      dists[mult==0] <- 0
+      
+      #nullifies the temporary variables (is this a best practice?)
+      mult <- NULL
+      xbinary <- NULL
+      xnona <- NULL
+    }
+
+    ## set a few things to debug
+#wbound = 1.5
+
+#----------------------------------#  
+#### Calculates the Clusterings ####
+#----------------------------------#
+  #sets default wbound value in case not specified by user
+  if(is.null(wbound)) wbound <- .5*sqrt(ncol(dists)) #since false, it ignores here
+  #solves issue with wbound below 1
+  if(wbound<=1) stop("Cannot have wbound <= 1") #not an issue here
+  
+  ## calculates the out value based on dissimilarity choice ##
+dissimilarity = "squared.distance"
+
+
+  ## GetUW is doing the iterative optimization that we need to dig into ## 
+### NOTE: the only difference between abs val and squared distance is the squared piece - is this right?
+  if (dissimilarity == "squared.distance") out <- GetUW(dists^2, wbound, niter = niter, uorth = uorth, silent = silent)
+  if (dissimilarity == "absolute.value")  out <- GetUW(dists, wbound, niter = niter, uorth = uorth, silent = silent)
+
+return(out)}
+
+UWpaul(wbound = 1.5)
+
+
+```
+
+A closer look at "out", which includes the sparse distance matrix "U" as well as the w values considered. 
+```{r golfout, include = TRUE}
+wbounds <- seq(1.1,3, length = 10)
+```
+
+If I were to re-run on a 
+
+
+
+
+
