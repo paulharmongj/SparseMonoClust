@@ -1,0 +1,617 @@
+---
+title: "Gap Statistic Optimization"
+author: "Paul Harmon"
+date: "11/11/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# required packages
+library(ggplot2);library(dplyr);library(readr)
+library(Rtsne); library(sparcl)
+library(magrittr)
+library(GGally);library(ggpubr)
+```
+
+
+# Introduction
+
+This document overviews a method I am implementing to try to optimize clustering solutions based on two parameters: 
+
++ **K**: The number of clusters
++ **s**: Degree of sparsity (aka $\lambda$)
+
+Tibshirani and Witten (2011) use a modified gap statistic based on permuted data to generate a tuning parameter for s only; additionally, Tibshirani, Hastie and Walther (2003) use the gap statistic as traditionally defined for generating the optimal number of clusters for k-means and hierarchical clustering.  
+
+However, prior to Brodinova et al (2019), not much has been done on tuning the parameters simultaneously. They propose using a modified gap statistic that can take both k and s into account (framed largely in the context of k-means).
+
+## Data Simulation
+
+To test the methods, I combined some of the simulated data I had created for the t-SNE work I did at JSM. In those cases, I simulated data with clear structure and with no discernable structure from multivariate normal distributions. I took 5 features from the clear structure and the rest are from the no-structure setup, with true class labels assigned. 
+
+This dataset has 25 clustering features, 5 of which contain signal and 20 of which are noise. The 26th column of the dataset is the label. The data are shown below: 
+
+```{r data_sim, include = TRUE, fig.align = 'center', fig.width = 10, fig.height = 8}
+library(mvtnorm)
+
+#No structure: Simluates 20 rv's with mean 50 and variance 25 (independent)
+set.seed(71919)
+no_structure <- rmvnorm(n = 70, mean = rep(50,20), sigma = diag(25,20)) %>% as_tibble()
+
+###Clear Structure
+set.seed(71919)
+#simulate first group
+g1 <- rmvnorm(n = 20, rep(40,20),diag(8, 20))
+#second group
+g2 <- rmvnorm(n = 20, rep(50,20), diag(8,20))
+#third group
+g3 <- rmvnorm(n = 30, rep(60,20), diag(8,20))
+
+clear_structure <- rbind(g1, g2, g3) %>% as_tibble()
+clear_structure$Group <- rep(c("1","2","3"), times = c(20,20,30)) %>% factor()
+
+
+## Some Structure: Based on the same method as clear structure
+# but this has slightly larger variances and closer means in each dimension
+set.seed(72019)
+g1_s <- rmvnorm(n = 20, rep(42,20),diag(21, 20))
+#second group
+g2_s <- rmvnorm(n = 20, rep(46,20), diag(25,20))
+#third group
+g3_s <- rmvnorm(n = 30, rep(50,20), diag(21,20))
+
+some_structure <- rbind(g1_s, g2_s, g3_s) %>% as_tibble()
+some_structure$Group <- rep(c("1","2","3"), times = c(20,20,30)) %>% factor()
+
+## Rather than using a single Clear, No, or Some structure, I create a new 
+## dataset that has a few features with some structure and many with none
+
+#new_dat <- cbind(clear_structure[,1:5], no_structure[,1:10], clear_structure$Group)
+new_dat <- cbind(clear_structure[,c(1:10)], clear_structure$Group)
+names(new_dat) <- c(paste0("V",1:10), "Group")
+ #Later, we want to Convert to matrix to get this to work with HCL later
+
+
+## Data visualization (parallel coordinate plots)
+## some quick visual assessment
+library(GGally)
+ggparcoord(new_dat, 
+           columns = 1:10,
+           groupColumn = 11,
+           scale = "globalminmax") +
+  labs(x = "Dimension",
+       y = "Simulated Value",
+       title = "Clear Structure, No Noise") +
+  theme_minimal() + theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_color_viridis_d(option = "D", end = 0.8)
+```
+
+
+
+## Methods
+
+In k-means, within-cluster sum of squares makes for an obvious way to define within-cluster similarity metric $w_k$. However, this is not so clearly defined in hierarchical clustering, where dendrograms are generated prior to the cutting of the tree (i.e. decision on k).  I use the following definition of $w_k$ as described in Yan and Ye (2007), with $C_m$ referring to a set of objects in cluster $m$: 
+
+$$W_k = \sum_{m=1}^{k} \frac{1}{2n_m} (\sum_{i,i' \in C_m} d_{i,i'})$$ 
+I use the following code to generate the within-cluster similarity, given a set of class labels and a distance matrix.  The function does the following: 
+
++ Take a set of labels and define how many unique values there are (i.e. what is k)
++ For each cluster label ($C_m$), calculate the sum of the values in the upper diagonal of the distance matrix
++ Then, divide by the size of the cluster times 2 and sum across all the clusters (as noted in formula)
+
+```{r Wfunction, include = TRUE}
+library(Matrix)
+CalculateW <- function(dist_mat, clust_labels){
+  labs <- clust_labels %>% unique() #generate the unique labels (i.e. length is # clusters)
+  
+  #initializes um so this updates each iteration
+  clustvec <- rep(0, length(labs))
+  for(j in 1:length(labs)){
+    #pull the index for all objects in cluster j
+    clust_index <- which(clust_labels %in% labs[j])
+    #extract the upper triangle (since a distance matrix has diag 0, I don't worry about it)
+    ut <- triu(dist_mat)
+    #now selects ONLY the relevant rows/cols in a cluster (for cluster m)
+    um <- ut[clust_index, clust_index] %>% sum() #calculates the sum of the selected clusters
+    wk = um/(length(clust_index)) #divides by the n_m (number of items in cluster) (no 2 in denom since only upper/lower triangle)
+    #stores the within-cluster similarity for each cluster in a vector
+    clustvec[j] <- wk
+    }
+return(list(w = sum(clustvec), cv = clustvec))}
+
+```
+
+When run on a basic cluster object, we see that within-cluster variation decreases as a function of sample size, as we would expect.  Moreover, it's interesting to see that the "elbow" that one might look for is fairly clearly defined somewhere in the neighborhood of 3 clusters (which is what we should be seeing). 
+
+```{r decrease1, echo = FALSE}
+#build a list of tuning parameters and Hlist to store Hclust objects
+Hlist <- list()
+wlist <- c(1.1, seq(1.2,5, by = .8)) %>% sort(., decreasing = TRUE)
+#generate a matrix with number of clusters by row, s-values for columns
+n_clust <- 20
+gapmat <- matrix(0, nrow = n_clust, ncol = length(wlist))
+
+
+#to store gaps
+gaps_list <- list()
+j = 1
+####calculate the original Hierarchical Clustering and get the first component of the Gap Stat###
+  ## wlist includes the tuning parameter values
+  new_dat_select <- select(new_dat, - Group)
+  hcl <- HierarchicalSparseCluster(as.matrix(new_dat_select), wbound = wlist[j], method = "average")
+  #grabs the cluster object and stores in a list for later use
+  Hlist[[j]] <-  hcl
+  
+  ##CHANGE THIS TO PULL CLUSTER IDs and calculate our own gap statistic
+  ### takes the tree and cuts it at a certain number k of clusters
+  ### stores the class labels in a matrix for later use (MAY or MAY NOT NEED)
+  
+  labels_mat <- matrix(0, nrow = nrow(new_dat), ncol = n_clust)
+  w_k <- rep(0, n_clust)
+  for(k in 1:n_clust){
+    #cuts the tree and stores the labels
+    labels_mat[,k] <- cutree(hcl$hc, k = k)
+    
+    #grabs the distance matrix from the hierarchical clustering (u)
+    # and labels for each k, storing the Wk value in a vector
+    w_k[k] <- CalculateW(hcl$u,labels_mat[,k])$w
+  }
+  
+  plot(w_k, type = "l", main = "Plot of Within-Cluster Similarity By K")
+  abline(v = 3, lty = 2, col = "firebrick")
+  
+```
+
+
+# Tuning for Sparsity and Number of Clusters
+
+The algorithm that I employed to try to figure out the number of clusters and optimal sparsity is as follows. I considered a fine grid of tuning parameter values and numbers of clusters.  
+
++ Fix $s$: Given a choice of sparsity,
++ Calculate the Hierarchical Clustering and obtain U and dendrogram
++ Then, fix $k$, the number of clusters. For $k$, I calculate the $w_k$ value based on the above function
++ Iterate through each of the $k$ values and store each $w_k$ in a vector
++ Now, generate a permuted dataset that feeds into the Hierarchical Clustering. Re-obtain U and new dendrogram
++ Fix $k$ again and calculate $w_k$, iterating through each $k$. Store as vector and combine into a matrix with a column per permutation. 
++ Now, calculate the gap statistics using the equal-weight formula and generate SE's
++ Store gap statistics, SE's, etc. in a list that is updated for each value of $s$. 
+
+I include the code that does this below: 
+
+```{r gap_code, include = TRUE}
+#generate a matrix with number of clusters by row, s-values for columns
+n_clust <- 20
+gapmat <- matrix(0, nrow = n_clust, ncol = length(wlist))
+
+#build a list of tuning parameters and Hlist to store Hclust objects
+Hlist <- list()
+wlist <- c(1.1, seq(1.2,5, by = .8)) %>% sort(., decreasing = TRUE)
+
+#to store gaps
+gaps_list <- list()
+w_values <- list()
+
+#properly define the set of features
+new_dat_select <- select(new_dat, - Group)
+## For loop to iterate through this whole thing
+for (j in 1:length(wlist)){
+  
+  ####calculate the original Hierarchical Clustering and get the first component of the Gap Stat###
+  ## wlist includes the tuning parameter values
+  hcl <- HierarchicalSparseCluster(as.matrix(new_dat_select), wbound = wlist[j], method = "average")
+  #grabs the cluster object and stores in a list for later use
+  Hlist[[j]] <-  hcl
+  
+  ##CHANGE THIS TO PULL CLUSTER IDs and calculate our own gap statistic
+  ### takes the tree and cuts it at a certain number k of clusters
+  ### stores the class labels in a matrix for later use (MAY or MAY NOT NEED)
+  
+  labels_mat <- matrix(0, nrow = nrow(new_dat), ncol = n_clust)
+  w_k <- rep(0, n_clust)
+  
+  for(k in 1:n_clust){
+    #cuts the tree and stores the labels
+    labels_mat[,k] <- cutree(hcl$hc, k = k)
+    
+    #grabs the distance matrix from the hierarchical clustering (u)
+    # and labels for each k, storing the Wk value in a vector
+    w_k[k] <- CalculateW(hcl$u,labels_mat[,k])$w
+  }
+   w_values[[j]] <- raw_wk <- w_k
+  #### PART II: Calcluate the permutation-based version for the expected value
+  #Permute the data:
+  ## Do this 10 times (for a given number of clusters and given s value)
+  #initialize permutation matrix with number of cluster row, one column per permutation
+  num_perm <- 10
+  perm_mat <- matrix(0, nrow = n_clust, ncol = num_perm)
+  
+  for(z in 1:num_perm){
+    #shuffles the columns in the data (similar to Witten's code)
+    ## PERMUTE THE ORIGINAL DATA AND THEN RECALCULATE THE DISTANCE MATRIX
+    orgdat <- as.matrix(new_dat[,-26])
+    permdat <- orgdat # the permuted version of the data
+    for (q in 1:ncol(orgdat)){permdat[,q] <- sample(orgdat[,q])} # INDEX BY Q HERE, NOT J
+    
+    #now we get a permuted HCL with same wbound values (taking in permuted data as input)
+    hcl_perm <- HierarchicalSparseCluster(permdat, wbound = wlist[j], method = "average")
+    
+    ## GENERATE THE DENDROGRAM, CUT THE TREE, and CALCULATE GAPS for each 
+    labels_mat <- matrix(0, nrow = nrow(permdat), ncol = n_clust)
+    w_k <- rep(0, n_clust)
+    for(k in 1:n_clust){
+      #cuts the tree and stores the labels
+      labels_mat[,k] <- cutree(hcl_perm$hc, k = k)
+      
+      #grabs the distance matrix from the hierarchical clustering (u)
+      # and labels for each k, storing the Wk value in a vector
+      w_k[k] <- CalculateW(hcl_perm$u,labels_mat[,k])$w
+      
+    }
+    perm_mat[,z] <- w_k #stores w values as column in matrix
+    
+  }   
+
+### Part III: Combining the Permutation information with the un-permuted data
+  #perm_mat has permuted gaps in the columns
+  #raw_wk has the original unpermuted gaps
+  
+  wk <- tibble(raw_wk, perm_mat) #generates the w values
+  logwk <- lapply(wk, log) %>% as_tibble() #takes the log of each column
+  logwk$Mean <- apply(logwk[,2:ncol(logwk)], 1, mean) #gets the mean of the permutations (raw wk is 1st col)
+  
+  
+  ### TAKE A CLOSER LOOK AT THIS CODE HERE - NEED TO TAKE MEAN THEN CALCULATE GAP
+  permgaps <- logwk #want to store permgaps as a different object so I can more easily look just at permutations later
+  permgaps$Gap <- permgaps$Mean - permgaps$raw_wk #Expected logwk - log(wk)
+  #permgaps$Gap <- permgaps$raw_wk - permgaps$Mean #based on Witten's Code, appears to produce the wrong result
+  serr <- function(ob){sqrt((1 + 1/num_perm) * var(ob)) } #Similar to method used in clusGap function
+  permgaps$SE <- apply(perm_mat, 1, serr) 
+  
+  #calculates the plus-minus error values
+  permgaps$Plus1 <- permgaps$Gap + permgaps$SE
+  permgaps$Min1 <- permgaps$Gap - permgaps$SE
+  
+  ## stores the permgaps tibble as an item in a list (to be combined later)
+  gaps_list[[j]] <- permgaps
+  #permgaps_list[[j]]
+}
+
+```
+
+
+## Plots of Clusters: 
+
+I considered plotting both ways - one with K as the x-axis and S as the line type, and vice-versa. Since there are a large number of K's in consideration, I filtered the data to include only up to 10 clusters when considering K as the line-type variable in the plot. 
+
+```{r plots, include = TRUE, fig.width = 8, fig.height = 8}
+#plots the gaps for a given value
+gaps <- rbind(gaps_list[[1]], gaps_list[[2]], gaps_list[[3]], gaps_list[[4]], gaps_list[[5]], gaps_list[[6]])
+gaps$S <- rep(unique(wlist),each = n_clust) #repeat S value for each run at a smoothing value (1 per K size)
+gaps$K <- rep(1:n_clust, times = 6) #repeat K sequence for each step in wlist
+#plot with K on the x-axis
+## to take a look at where the SE for 3 cluster solutions is
+f1 <- filter(gaps, S > 3.5 & S < 3.7 & K == 3)$Plus1
+
+ggplot(gaps, aes(K, Gap, group = S)) + geom_line(aes(color = factor(S))) + geom_errorbar(aes(K, ymin = Min1,ymax = Plus1, color = factor(S)), alpha =.5) + ggtitle("Gap by # Clusters") + theme_bw() +xlab("Number of Clusters K")
+#+ geom_abline(slope = 0, intercept = f1, linetype = 2, color = "red2")
+
+
+```
+
+Here, we see the optimal solution appears to be the 3 cluster solution when the tuning parameter does not remove a large number of features. Since in this case, all the variables have some level of signal added to the variation in the data, it makes sense that limited regularization should be preferred. In this case, more stringent s-values seem to zero out important features and have a harder time finding an optimal gap (and definitely don't identify the right number of clusters). 
+
+
+```{r plots2, include = TRUE}
+#plot with s on the x-axis
+gaps_filter <- gaps %>% filter(., K < 10)
+ggplot(gaps_filter, aes(S, Gap, group = K)) + geom_line(aes(color = factor(K))) + geom_errorbar(aes(S, ymin = Min1,ymax = Plus1, color = factor(K)), alpha =.5) + ggtitle("Gap by Sparsity") + theme_bw() + 
+  scale_x_reverse()
+
+```
+
+Here, we see the same solution, and it is clear that the 3-cluster solution is optimal across all smoothing values up to a value of roughly 3.1, where it seems that we have induced enough sparsity that we are now removing useful features from the clustering solution. 
+
+Either way we look at it, these results indicate that the gap statistic method works when all the features are adding meaningful signal and when the separation of clusters is relatively obvious. 
+
+### Permutation Plot
+
+```{r}
+library(tidyr)
+## Code to generate beanplots of permutation values for each number of k (constrained to 1..20)
+d <-gaps_list[[1]]$perm_mat %>% as_tibble() #for a single tuning parameter value
+#d$raw <- gaps_list[[1]]$raw_wk
+
+pdat <- d %>% gather(Val, Key)
+pdat$s <- rep(1:20, times = 10)
+library(beanplot)
+beanplot(pdat$Key ~ pdat$s, col = "dodgerblue2", xlab = "K", yab = "Permutation Gaps", main = "Permuted W Values")
+#points(1:10, filter(pdat, Val %in% 'raw')$Key)
+
+```
+
+
+### Within-Cluster SS For Solutions
+
+When the solution is obvious, we see that the within-cluster similarity measure has an elbow at 3 clusters. This matches what we are seeing from the gap statistic, and appears to be pretty compelling. 
+```{r}
+library(tidyr)
+sil <- w_values %>% as_tibble(.name_repair = 'unique') %>% gather()
+sil$k <- rep(1:20, times = length(w_values))
+
+ggplot(sil, aes(k,value, group = key)) + geom_line(aes(color = key)) + theme_bw() + 
+  scale_color_viridis_d() + ggtitle("Within-Cluster SS For Different K")
+```
+
+
+### Comparison to Witten's Permutation Code
+Additionally, it probably makes sense to make a plot that mimics that of the one returned by HierarchicalSparseCluster.permute, as shown below. 
+
+```{r, include = TRUE}
+d <- select(new_dat, -Group) %>% as.matrix()
+x <- HierarchicalSparseCluster.permute(d, nperms = 10, wbounds = wlist)
+plot(x)
+text(x$nnonzerows, x$gaps, round(x$wbounds,2), col = "tomato2")
+```
+
+Based on my gap statistic version, I obtain something that looks like the following, setting the number of clusters to 3. My method does not calculate the gap statistic in quite the same way as Witten's method - she uses a criterion value that comes from a fixed number of clusters, whereas this calculates the within-cluster simliarity in a slightly different way. 
+```{r}
+getNZ <- function(object){length(which(object$ws != 0))}
+nonzero <- lapply(Hlist, getNZ)
+gaps_filter$nonzero <- rep(nonzero, each = length(unique(gaps_filter$K)))
+gaps_filter_filter <- filter(gaps_filter, K == 3)
+ggplot(gaps_filter_filter, aes(as.numeric(nonzero), Gap, group = factor(K))) + geom_line(aes(color = factor(K))) + geom_point(color = "red") + geom_text(aes(label = S))+ xlab("# Nonzero Features")
+  ggtitle("Gaps by Nonzero Features")
+```
+
+A deeper drill-down into this table: 
+```{r}
+knitr::kable(gaps_filter_filter, width = 500)
+```
+
+
+# Obvious Clusters With Noise Features
+
+Using the same method, I simulated data with obvious 3-cluster solution but with a few noise features added in. There are 10 features with clear signal and 5 features that add no signal, with 3 true clusters.  
+```{r obv_noise, include = TRUE, echo = FALSE}
+
+new_dat2 <- cbind(clear_structure[,c(1:10)], no_structure[,1:5], clear_structure$Group)
+names(new_dat2) <- c(paste0("V",1:15), "Group")
+new_dat2 <- new_dat2 
+
+
+## Data visualization (parallel coordinate plots)
+## some quick visual assessment
+ggparcoord(new_dat2, 
+           columns = 1:15,
+           groupColumn = 16,
+           scale = "globalminmax") +
+  labs(x = "Dimension",
+       y = "Simulated Value",
+       title = "Structure With Noise Features") +
+  theme_minimal() + theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_color_viridis_d(option = "D", end = 0.8)
+```
+
+
+## Results
+
+```{r}
+source("C:/Users/paulh/Documents/Doctoral Work/R Functions/SparseGap Function.R")
+```
+
+
+I ran the gap statistic code on the data and found generated the plots of gap statistics by S and K. 
+
+```{r gap_code2, include = TRUE, echo = FALSE}
+new_dat2_select <- select(new_dat2, -Group)
+cs <- TuneGap(n_clust = 15, data_object = new_dat2_select, num_perm = 10)
+
+```
+
+Gap statistic by number of clusters is below: 
+
+```{r plots_noise, include = TRUE, fig.width = 8, fig.height = 8}
+plot.TuneGap(cs$gapmat) + xlab("Number of Clusters K")
+
+
+```
+
+Gaps by S: 
+
+```{r plots2_noise, include = TRUE}
+plot.TuneGap(cs$gapmat, plot_type = "s") 
+```
+
+Then, the within-cluster similarity metric is as follows. 
+
+```{r, echo = FALSE}
+wvals <- cs$wvals
+sil <- wvals %>% as_tibble(.name_repair = 'unique') %>% gather()
+sil$k <- rep(1:15, times = length(wvals))
+
+ggplot(sil, aes(k,value, group = key)) + geom_line(aes(color = key)) + theme_bw() + 
+  scale_color_viridis_d() + ggtitle("Within-Cluster SS For Different K")
+```
+
+
+# Less Obvious Clusters and Noise 
+
+Data were simulated with fewer clusters and slightly tighter groups. Here, I include 5 clear variables, 5 that may or may not be clear (some structure), and 5 obvious noise features. 
+```{r less_obv_noise, include = TRUE, echo = FALSE}
+
+new_dat3 <- cbind(clear_structure[,c(1:5)],some_structure[,c(1:5)], no_structure[,1:5], clear_structure$Group)
+names(new_dat3) <- c(paste0("V",1:15), "Group")
+
+
+
+## Data visualization (parallel coordinate plots)
+## some quick visual assessment
+ggparcoord(new_dat3, 
+           columns = 1:15,
+           groupColumn = 16,
+           scale = "globalminmax") +
+  labs(x = "Dimension",
+       y = "Simulated Value",
+       title = "Some Structure With Noise Features") +
+  theme_minimal() + theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_color_viridis_d(option = "D", end = 0.8)
+```
+
+```{r gap_code3, include = TRUE, echo = FALSE}
+new_dat3_select <- select(new_dat3, -Group)
+cs2 <- TuneGap(n_clust = 15, data_object = new_dat3_select, num_perm = 10)
+
+```
+
+
+
+```{r plots_ns_noise, include = TRUE, fig.width = 8, fig.height = 8}
+plot.TuneGap(cs2$gapmat)
+```
+
+Gaps by S: 
+
+```{r plots2_ns_noise, include = TRUE}
+plot.TuneGap(cs2$gapmat, plot_type = "s")
+```
+
+Then, the within-cluster similarity metric is as follows. 
+
+```{r within_noise_ns}
+w_values <- cs2$wvals
+sil <- w_values %>% as_tibble(.name_repair = 'unique') %>% gather()
+sil$k <- rep(1:15, times = length(w_values))
+
+ggplot(sil, aes(k,value, group = key)) + geom_line(aes(color = key)) + theme_bw() + 
+  scale_color_viridis_d() + ggtitle("Within-Cluster SS For Different K")
+```
+
+## W
+
+
+Here, we see the 'optimal' solution has 7 clusters with sparsity of 1.2, as is chosen below. I need to confirm that I'm calculating the standard errors in a reasonable way but for now, not many of the points have substantial variability so following the 1SE rule is basicallly just as easy as finding a maximum in the plot. 
+
+Interestingly, based on the plot with degree of sparsity on the X-axis, we see that the "optimal" solution appears to be 7 clusters with sparsity of 1.2 (the second-most sparse solution). If we look at the number of nonzero features in that solution, we see that the number of nonzero weight coefficients is 2, so it only uses 2 features in the clustering. 
+
+
+
+## More Extreme Case: 
+
+Lastly, I simulate data with only 5 signal features and 100 noise features.  Additionally, I decreased the distance between the clusters so that although there is clear structure, it is not as evident as in the previous cases. 
+
+```{r simdat_extreme, include = TRUE, fig.align = 'center', fig.width = 10, fig.height = 6}
+
+#No structure: Simluates 20 rv's with mean 50 and variance 25 (independent)
+set.seed(71919)
+no_structure <- rmvnorm(n = 90, mean = rep(50,50), sigma = diag(25,50)) %>% as_tibble()
+
+###Clear Structure
+set.seed(71919)
+#simulate first group
+g1 <- rmvnorm(n = 30, rep(44,20),diag(8, 20))
+#second group
+g2 <- rmvnorm(n = 30, rep(50,20), diag(8,20))
+#third group
+g3 <- rmvnorm(n = 30, rep(55,20), diag(8,20))
+
+clear_structure <- rbind(g1, g2, g3) %>% as_tibble()
+clear_structure$Group <- rep(c("1","2","3"), times = c(30,30,30)) %>% factor()
+
+## Rather than using a single Clear, No, or Some structure, I create a new 
+## dataset that has a few features with some structure and many with none
+
+#new_dat <- cbind(clear_structure[,1:5], no_structure[,1:10], clear_structure$Group)
+fin_dat <- cbind(clear_structure[,1:5], no_structure[,1:50],clear_structure$Group)
+names(fin_dat) <- c(paste0("V",1:55), "Group")
+
+#visualize
+ggparcoord(fin_dat, 
+           columns = 1:55,
+           groupColumn = 56,
+           scale = "globalminmax") +
+  labs(x = "Dimension",
+       y = "Simulated Value",
+       title = "Noisy Data") +
+  theme_minimal() + theme(plot.title = element_text(hjust = 0.5)) + 
+  scale_color_viridis_d(option = "D", end = 0.8)
+
+```
+
+```{r spgap, include = TRUE}
+fin_dat_select <- select(fin_dat, -Group)
+csfin <- TuneGap(n_clust = 15, data_object = fin_dat_select, num_perm = 10)
+```
+
+
+In this case, the results aren't quite as clear (nor should they be).  The 1-se rule would indicate that our optimal choice would be a 2-cluster solution with s = 2 (relatively sparse). 
+```{r}
+plot.TuneGap(csfin$gapmat)
+```
+
+Looking at it this way, the plot seems to indicate that as sparsity increases, gaps initially decrease, then increase, and decrease again. This may indicate that there is enough noise to 'swamp' some of the signal. 
+
+```{r}
+plot.TuneGap(csfin$gapmat, plot_type = "s")
+```
+
+How does the more traditional method of looking at within-cluster similarity look? It's definitely not as clear as in the previous cases; however, the most sparse solutions appear to have an elbow closer to 3. This method still seems to perform marginally better than in the gap statistic version. 
+
+```{r}
+w_values <- csfin$wvals
+sil <- w_values %>% as_tibble(.name_repair = 'unique') %>% gather()
+sil$k <- rep(1:15, times = length(w_values))
+
+ggplot(sil, aes(k,value, group = key)) + geom_line(aes(color = key)) + theme_bw() + 
+  scale_color_viridis_d() + ggtitle("Within-Cluster SS For Different K")
+```
+
+
+
+# Comparison of Linkages
+
+Here, I add a few plots comparing the different type of linkage functions that are available in Hierarchical Sparse Cluster. The options that are available include single, complete, average, and 'centroid' linkage. 
+
+
+```{r linkage comparison}
+new_dat3_select <- select(new_dat3, -Group)
+cs_av <- TuneGap(n_clust = 15, data_object = new_dat3_select, num_perm = 30, method = "average")
+
+cs_complete <- TuneGap(n_clust = 15, data_object = new_dat3_select, num_perm = 30, method = "complete")
+cs_single <- TuneGap(n_clust = 15, data_object = new_dat3_select, num_perm = 30, method = "single")
+
+
+#generate plots
+a <- plot.TuneGap(cs_av$gapmat)
+b <- plot.TuneGap(cs_complete$gapmat)
+c <- plot.TuneGap(cs_single$gapmat)
+library(ggpubr)
+ggarrange(a,b,c)
+```
+
+
+
+## Different Resampling Schemes
+
+Here I examine a comparison of the different methods when the data do not fit a uniform distribution. I simulated a few skewed quantiative fields. 
+
+```{r}
+#simulates a skewed distribution
+new_dat$V11 <- new_dat$V1 + rgamma(nrow(new_dat),shape = 2*new_dat$V1, scale = 1/7) 
+unif <- runif(nrow(new_dat), min = min(new_dat$V11), max = max(new_dat$V11))
+permdat <- rep(0, nrow(new_dat))
+permdat <- sample(new_dat$V11) #sample without replacement
+plot(density(new_dat$V11), lty = 2, col = "blue3", main = "Densities of Re-Sampled Data")
+lines(density(unif), col = "red2")
+lines(density(permdat), col = "yellowgreen", lty = 3)
+
+```
+
+
+## A couple ideas:
+ 
++ Comparison of KL Divergence of the permutation distribution, the uniform distribution, and the SVD uniform distribution in the gap statistic. (maybe average KL divergence)
++ Other things? 
+
+

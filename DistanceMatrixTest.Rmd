@@ -1,0 +1,314 @@
+---
+title: "Test Weighting Matrix"
+author: "Paul Harmon"
+date: "12/15/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyr)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(sparcl)
+
+#l2norm function
+l2n <- function(vec){
+  return(sqrt(sum(vec^2)))
+}
+```
+
+# Introduction
+
+We can either modify HierarchicalSparseCluster() or MonoClust() in order to induce sparse monothetic clustering. Ideally, if we can use the weight vector w to re-weight the original data, we can pass this reweighted version directly through to MonoClust. 
+
+Alternatively, we would need to allow monoclust to pass a dissimilarity matrix as input. 
+
+
+# Example
+
+Using a 15x3 NBA dataset. 
+
+```{r}
+nba <- read.csv("C:/Users/paulh/OneDrive/Documents/Utah Jazz Simulations/UtahJazzPredictions/Player_Stats.csv")
+#scales the dataset
+## Consider a dataframe
+nba1 <- select(nba, FG, ORB, PTS) %>% apply(2,scale)
+```
+
+
+Applies Sparse Hierarchical Clustering. 
+```{r}
+hc1 <- HierarchicalSparseCluster(as.matrix(nba1), wbound = 1.01, dissimilarity = "squared.distance")
+hc1$ws #weights
+#hc1$dists #gives the feature-wise dissimilarity matrix (nxn)*p
+#hc1$u  %>% round(3)#this is the 'sparse' distance matrix
+
+
+#hc1$dists %*% hc1$ws 
+#hc1$u
+
+#heatmaps
+#heatmap(hc1$u, main = "Heatmap of Sparse Distance Matrix")
+image(hc1$u, main = "Heatmap of Sparse Distance Matrix")
+```
+
+Form of the nxn dissimilarity matrix u: 
+
+$u = (\sum_j w_j d_{ii’j})_{ii’}$
+
+
+```{r}
+## Calculates the pairwise dissimilarities for EACH feature and vectorizes them
+d1 <- c(dist(nba1[,1])^2)
+d2 <- c(dist(nba1[,2])^2)
+d3 <- c(dist(nba1[,3])^2)
+ds1 <- apply(nba1,2, dist2)
+ds <- cbind(d1,d2,d3)
+#weights are given above - I think this is the lower/upper triangle
+# Should be the form w_j * di,i',j
+wv1 = (hc1$ws[1] * d1) + (hc1$ws[2] * d2) + (hc1$ws[3] * d3)
+wv2 = sweep(ds, 2, hc1$ws, '*') %>% apply(1,sum) #these do the same thing
+wv3 = sweep(ds1, 2, hc1$ws, '*') %>% apply(1,sum)
+#u2 <- wv
+
+
+u2 <- matrix(0, nrow = 15, ncol = 15)
+u2[lower.tri(u2)] <- wv
+u2[upper.tri(u2)] <- wv
+u2dist <- as.dist(u2/l2n(c(u2))) # now in the form of distance matrix with 0's along diagonal
+
+#image(u2, main = "Based on Original Data")
+
+plot(c(u2dist), c(as.dist(hc1$u)), main = "Difference of U values")
+
+## Test Equality: Up to 5 decimals
+round(c(u2dist),5) == round(c(as.dist(hc1$u)),5)
+all.equal(c(u2dist), c(as.dist(hc1$u)))
+```
+
+```{r notes, include = FALSE}
+#utDw
+# u
+# D is our dists object
+# w is our weights
+
+#find vectorized distance matrix
+# take the sum of squared elements
+
+
+## Calculate 3rd version:
+# Element-by-element dist function - try putting a square root of the 
+# factor weight in FIRST, then calculate dist, and try to match the output
+# don't add the w's again twice - reminder, they're already incorporated
+
+#output would go directly into monoclust
+
+```
+
+
+## Step 3: ADd the W's First and Calculate Dist 
+
+In this case, the l2norm gets added to the w's as a component of the weight. 
+
+```{r}
+## Calculate the Weights, divided by the l2norm: 
+wvec <- hc1$ws/l2n(c(u2))
+
+
+# Multiply the weights times the original data features sqrt(wj)
+nba_weight_1 <- sqrt(wvec[1])*nba1[,1]
+nba_weight_2 <- sqrt(wvec[2])*nba1[,2]
+nba_weight_3 <- sqrt(wvec[3])*nba1[,3]
+
+#Calculate New Distances
+d1 <- c(dist(nba_weight_1)^2)
+d2 <- c(dist(nba_weight_2)^2)
+d3 <- c(dist(nba_weight_3)^2)
+
+#Coerce into a Distance matrix
+wv2 <- d1 + d2 + d3
+u3 <- matrix(0, nrow = 15, ncol = 15)
+u3[lower.tri(u2)] <- wv2
+u3[upper.tri(u2)] <- wv2
+u3dist <- as.dist(u3)
+
+# Plot for Comparison
+plot(c(u3dist), c(as.dist(hc1$u)), main = "Difference of U values", pch = 20, col = "red", asp = 1)
+abline(a = 0, b = 1)
+
+
+## Complete Comparison
+all.equal(c(u3dist), c(as.dist(hc1$u)))
+
+```
+
+
+
+# A Note on Documentation
+
+In the documentation, it states that the $dists object is (nxn)xp. However, it not the case that this is nxn - this is created by calculating the pairwise disimilarities for each of the features - this is thus (nC2)xp. 
+
+```{r}
+round(hc1$dists,3) == round(matrix(c(d1,d2,d3), ncol = 3),3)
+all.equal(hc1$dists, matrix(c(d1,d2,d3)))
+
+hc1$dists[1,1]
+d1[1]
+```
+
+## Functionalization
+
+The function takes the weights from sparcl and integrates them into the original dataset. It also does a norming step so it has to calculate the weighted distance matrix under the hood to get the norm. 
+
+```{r}
+## Wrapper for MonoClust
+library(monoClust)
+
+SparseMonoClust <- function(rawdata, wbound = 1.1, dissimilarity = "squared.distance", nclusters = 3, scale1 = FALSE){
+  ## Define a l2norm function
+  l2n <- function(vec){
+    return(sqrt(sum(vec^2)))
+  }
+  
+  ## Check Packages
+  if(!require(sparcl)){install.packages('sparcl');library(sparcl)}
+  if(!require(monoClust)){install.packages('monoClust');library(monoClust)}
+  
+  ## Optional Scaling of the original data
+ifelse(scale1 ==TRUE, data = apply(rawdata, 2,scale), data = rawdata)
+  
+  print("Hey! You're not going to be on the original units!")
+  
+  ## First Step: Perform Sparse Clustering to Get W Vector
+  hc1 <- HierarchicalSparseCluster(as.matrix(data), wbound = wbound, dissimilarity = dissimilarity)
+  
+  
+  ## Second Step: Calculate the Distance Matrix and L2Norm (to match scaling of the 'sparcl' u matrix)
+
+  dist2 <- function(vec){(dist(vec)^2)}
+  ds <- apply(data, 2, dist2)
+  weighted_feature_dists <- sweep(ds, 2, hc1$ws, '*')
+  single_weighted_dist <- apply(weighted_feature_dists, 1, sum)
+
+  u2 <- matrix(0, nrow = nrow(data), ncol = nrow(data))
+  u2[lower.tri(u2)] <- single_weighted_dist
+  u2[upper.tri(u2)] <- single_weighted_dist
+  normed_u2 <- u2/l2n(c(u2)) #generates the normed u vector (identical to the hcl$u)
+  
+  ## Now - reweight the original data with both the weights and the l2norm
+  ws_final <- sqrt(hc1$ws/l2n(c(u2)))
+  data_weight <- sweep(data, 2, ws_final, '*')
+  
+  
+  ## Passes the weighted data into MonoClust
+  mc <- MonoClust(as.data.frame(data_weight), nclusters = nclusters)
+  
+  ## Post-Processing: Either another step in this function, or a method applied afterward
+  
+return(list(clustob = mc, u = normed_u2, weighted_data = data_weight, w = hc1$ws, sparclob = hc1))}
+
+## Post-Processing Function
+# Goal - to undo scaling/weighting to get interpretations on the original scale
+## Warnings around prediction: 
+
+## append a changed variable name when you run your function
+# pts_w: make it clear that we're not on the original units
+# output the means and standard deviations for each z score
+
+## predict.monoclust vs. cuttree equivalent
+## augmented predict function that searches through the tree
+## predict cluster memebership on a given dataset
+## alternate approach: look at cuttree and write our own version or use it directly
+
+## Ruspini dataset with added noise features
+
+```
+
+
+Some Testing on the function: Here we should see splits being made on the last feature and the first feature, (Pts and FG, respectively), as we are passing in a 0 weight on the ORB feature. 
+```{r, include = TRUE}
+### Testing
+nbatest <- select(nba, FG, ORB, PTS)
+sp1 <- SparseMonoClust(nbatest, wbound = 1.8, scale = TRUE)
+
+sp1$w
+
+plot(sp1$clustob)
+
+#validate
+dim(sp1$sparclob$u)
+dim(sp1$u)
+
+#comparison with plot
+plot(c(as.dist(sp1$sparclob$u)), c(as.dist(sp1$u)), asp = 1)
+#comparison with all.equal
+all.equal(c(as.dist(sp1$sparclob$u)), c(as.dist(sp1$u)))
+round(c(as.dist(sp1$sparclob$u)),3) == round(c(as.dist(sp1$u)),3)
+
+
+```
+
+
+More testing - this time with a slightly larger dataset. 
+
+```{r}
+nbatest2 <- select(nba, FG, ORB, PTS, Age, G, BLK, PF, DRB, AST, X3P)
+sp2 <- SparseMonoClust(nbatest2, wbound = 1.1)
+
+sp2
+
+plot(sp2$clustob)
+
+#comparison with plot
+plot(c(as.dist(sp2$sparclob$u)), c(as.dist(sp2$u)))
+#comparison with all.equal
+all.equal(c(as.dist(sp2$sparclob$u)), c(as.dist(sp2$u)))
+round(c(as.dist(sp2$sparclob$u)),3) == round(c(as.dist(sp2$u)),3)
+
+```
+
+Additional Testing Case: 
+
+```{r}
+#uses the same dataset
+sp3 <- SparseMonoClust(nbatest2, wbound = 1.6)
+sp3$w
+
+  #comparison with plot
+plot(c(as.dist(sp3$sparclob$u)), c(as.dist(sp3$u)))
+#comparison with all.equal
+all.equal(c(as.dist(sp3$sparclob$u)), c(as.dist(sp3$u)))
+round(c(as.dist(sp3$sparclob$u)),3) == round(c(as.dist(sp3$u)),3)
+  
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

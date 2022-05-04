@@ -1,0 +1,35 @@
+---
+title: "Replicate Witten Gene Data Results"
+author: "Paul Harmon"
+date: "2/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This document attempts to replicate Witten and Tibshirani's results on the genetics data that they analyzed. Their paper does not contain any simulation study that pertains directly to sparse hierarchical clustering; rather, it uses this as an example. 
+
+The data are available at this [link](http://genome-www.stanford.edu/breast_cancer/molecularportraits/download.shtml) and are from a paper that examines gene expression microarrays to profile 65 surgical specimens of human breast tumors, written by Perou et al (2000). Paper link is included [here](http://genome-www.stanford.edu/breast_cancer/molecularportraits/index.shtml). 
+
+
+# Methods
+
+In line with Witten and Tibshirani's results, I downloaded the data and applied Sparse Hierarchical clustering to the dataset. 
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
